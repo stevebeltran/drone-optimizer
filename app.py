@@ -20,12 +20,12 @@ if 'files_ready' not in st.session_state:
 with st.expander("📁 Upload Data Files", expanded=not st.session_state['files_ready']):
     uploaded_files = st.file_uploader("Drop all 6 files here (calls.csv, stations.csv, and 4 Shapefile components)", accept_multiple_files=True)
 
-# High-Contrast Palette (No Turquoise)
+# High-Contrast "Heavy" Palette - Specifically chosen for light maps
+# Removed all light/pastel/turquoise colors.
 STATION_COLORS = [
-    "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231", 
-    "#911EB4", "#F032E6", "#BCF60C", "#FABEBE", "#008080", 
-    "#E6BEFF", "#9A6324", "#FFFAC8", "#800000", "#AAFFC3", 
-    "#808000", "#FFD8B1", "#000075", "#808080", "#FFFFFF"
+    "#E6194B", "#3CB44B", "#4363D8", "#F58231", "#911EB4", 
+    "#800000", "#333333", "#000075", "#808000", "#9A6324", 
+    "#5E35B1", "#1B5E20", "#B71C1C", "#0D47A1", "#212121"
 ]
 
 def get_circle_coords(lat, lon, r_mi=2):
@@ -52,16 +52,18 @@ if call_data and station_data and len(shape_components) >= 3:
             buffer.write(f.getbuffer())
     
     try:
-        # 1. GEOGRAPHY
+        # 1. LOAD GEOGRAPHY
         shp_path = [os.path.join("temp", f.name) for f in shape_components if f.name.endswith('.shp')][0]
         city_gdf_all = gpd.read_file(shp_path)
         if city_gdf_all.crs is None: city_gdf_all.set_crs(epsg=4269, inplace=True)
         city_list = sorted(city_gdf_all['NAME'].unique())
+        
+        # Default to Boston or Benton based on contents
         default_ix = city_list.index("Boston") if "Boston" in city_list else (city_list.index("Benton") if "Benton" in city_list else 0)
         
         st.markdown("---")
         ctrl_col1, ctrl_col2 = st.columns([1, 2])
-        target_city = ctrl_col1.selectbox("📍 City Boundary", city_list, index=default_ix)
+        target_city = ctrl_col1.selectbox("📍 Jurisdiction", city_list, index=default_ix)
         
         city_gdf = city_gdf_all[city_gdf_all['NAME'] == target_city].to_crs(epsg=4326)
         city_boundary = city_gdf.iloc[0].geometry
@@ -69,7 +71,7 @@ if call_data and station_data and len(shape_components) >= 3:
         epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
         city_m = city_gdf.to_crs(epsg=epsg_code).iloc[0].geometry
         
-        # 2. DATA LOAD
+        # 2. LOAD DATA
         df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
         df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
         
@@ -91,9 +93,9 @@ if call_data and station_data and len(shape_components) >= 3:
                 'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
             })
 
-        # --- 4. DUAL OPTIMIZER ---
-        st.sidebar.header("🎯 Optimizer Settings")
-        k = st.sidebar.slider("Number of Stations", 1, len(station_metadata), min(2, len(station_metadata)))
+        # --- 4. OPTIMIZER ---
+        st.sidebar.header("🎯 Optimizer Controls")
+        k = st.sidebar.slider("Number of Stations to Deploy", 1, len(station_metadata), min(2, len(station_metadata)))
         
         combos = list(itertools.combinations(range(len(station_metadata)), k))
         if len(combos) > 2000: combos = combos[:2000]
@@ -101,38 +103,34 @@ if call_data and station_data and len(shape_components) >= 3:
         best_call_combo, max_calls = None, -1
         best_geo_combo, max_area = None, -1
         
-        with st.spinner("Calculating optimal combinations..."):
+        with st.spinner("Analyzing optimal placements..."):
             for combo in combos:
-                # Optimized Call Math
+                # Call Coverage Optimization
                 union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
                 if len(union_set) > max_calls:
-                    max_calls = len(union_set)
-                    best_call_combo = combo
+                    max_calls = len(union_set); best_call_combo = combo
                 
-                # Optimized Area Math
+                # Area Coverage Optimization
                 union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
                 if union_geo.area > max_area:
-                    max_area = union_geo.area
-                    best_geo_combo = combo
+                    max_area = union_geo.area; best_geo_combo = combo
             
             best_call_names = [station_metadata[i]['name'] for i in best_call_combo]
             best_geo_names = [station_metadata[i]['name'] for i in best_geo_combo]
 
-        # --- DISPLAY BOTH LISTS IN SIDEBAR ---
+        # --- SIDEBAR RANKINGS ---
         st.sidebar.markdown("---")
         st.sidebar.subheader("🏆 Best for Call Response")
-        for name in best_call_names:
-            st.sidebar.write(f"✅ {name}")
-        st.sidebar.caption(f"Covers {max_calls:,} calls ({(max_calls/len(calls_in_city))*100 if len(calls_in_city)>0 else 0:.1f}%)")
+        for name in best_call_names: st.sidebar.write(f"✅ {name}")
+        st.sidebar.caption(f"Covers {max_calls:,} total incident points")
 
         st.sidebar.markdown("---")
         st.sidebar.subheader("🌍 Best for Land Coverage")
-        for name in best_geo_names:
-            st.sidebar.write(f"📍 {name}")
-        st.sidebar.caption(f"Covers {(max_area/city_m.area)*100:.1f}% of city land mass")
+        for name in best_geo_names: st.sidebar.write(f"📍 {name}")
+        st.sidebar.caption(f"Covers {(max_area/city_m.area)*100:.1f}% of total area")
 
-        # --- MAIN UI ---
-        active_names = ctrl_col2.multiselect("📡 Active Stations on Map", options=df_stations_all['name'].tolist(), default=best_call_names)
+        # --- MAIN INTERFACE ---
+        active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_call_names)
         
         area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
         if active_names:
@@ -142,6 +140,7 @@ if call_data and station_data and len(shape_components) >= 3:
             area_covered_perc = (unary_union(active_buffers).area / city_m.area) * 100
             if len(calls_in_city) > 0:
                 calls_covered_perc = (len(set().union(*active_indices)) / len(calls_in_city)) * 100
+            
             inters = []
             for i in range(len(active_buffers)):
                 for j in range(i+1, len(active_buffers)):
@@ -151,32 +150,56 @@ if call_data and station_data and len(shape_components) >= 3:
         
         st.markdown("---")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Calls (City)", f"{len(calls_in_city):,}")
-        m2.metric("Call Coverage %", f"{calls_covered_perc:.1f}%")
+        m1.metric("Total Incident Points", f"{len(calls_in_city):,}")
+        m2.metric("Response Capacity %", f"{calls_covered_perc:.1f}%")
         m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
-        m4.metric("Overlap", f"{overlap_perc:.1f}%")
+        m4.metric("Redundancy (Overlap)", f"{overlap_perc:.1f}%")
 
-        # --- MAP ---
+        # --- THE MAP ---
         fig = go.Figure()
-        bx, by = city_boundary.exterior.coords.xy
-        fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#444", width=2), name="City Boundary", hoverinfo='skip'))
         
+        # 1. City Boundary
+        bx, by = city_boundary.exterior.coords.xy
+        fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
+        
+        # 2. Service Calls (Midnight Blue)
         if len(calls_in_city) > 0:
             sample_size = min(5000, len(calls_in_city))
             calls_map = calls_in_city.to_crs(epsg=4326).sample(sample_size)
-            fig.add_trace(go.Scattermap(lat=calls_map.geometry.y, lon=calls_map.geometry.x, mode='markers', marker=dict(size=4, color='#00008B', opacity=0.4), name="Calls (Sample)", hoverinfo='skip'))
+            fig.add_trace(go.Scattermap(
+                lat=calls_map.geometry.y, 
+                lon=calls_map.geometry.x, 
+                mode='markers', 
+                marker=dict(size=4, color='#000080', opacity=0.35), # Deep Midnight Blue
+                name="Incident Data", 
+                hoverinfo='skip'
+            ))
         
+        # 3. Stations & Heavy Rings
         all_names = df_stations_all['name'].tolist()
         for i, s in enumerate(station_metadata):
             if s['name'] in active_names:
                 color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
                 clats, clons = get_circle_coords(s['lat'], s['lon'])
-                fig.add_trace(go.Scattermap(lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 18], color=color), line=dict(color=color, width=3), fill='toself', fillcolor='rgba(0,0,0,0)', name=f"{s['name']}", hoverinfo='name'))
+                fig.add_trace(go.Scattermap(
+                    lat=list(clats) + [None, s['lat']], 
+                    lon=list(clons) + [None, s['lon']], 
+                    mode='lines+markers', 
+                    marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
+                    line=dict(color=color, width=4.5), # Increased width for contrast
+                    fill='toself', fillcolor='rgba(0,0,0,0)', 
+                    name=f"{s['name']}",
+                    hoverinfo='name'
+                ))
 
-        fig.update_layout(map_style="open-street-map", map_zoom=12, map_center={"lat": city_boundary.centroid.y, "lon": city_boundary.centroid.x}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
+        fig.update_layout(
+            map_style="open-street-map", map_zoom=12, 
+            map_center={"lat": city_boundary.centroid.y, "lon": city_boundary.centroid.x}, 
+            margin={"r":0,"t":0,"l":0,"b":0}, height=800
+        )
         st.plotly_chart(fig, width='stretch')
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Analysis Error: {e}")
 else:
-    st.info("👋 Upload your files to start optimized analysis.")
+    st.info("👋 Upload data files to begin tactical analysis.")
