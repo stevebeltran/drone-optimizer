@@ -10,7 +10,7 @@ import shutil
 import itertools
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="High-Performance Drone Optimizer", layout="wide")
+st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
 st.title("🛰️ High-Performance Drone Optimizer")
 
 # --- UPLOAD SECTION ---
@@ -196,3 +196,4 @@ if call_data and station_data and len(shape_components) >= 3:
         st.error(f"Analysis Error: {e}")
 else:
     st.info("👋 Upload data files to begin tactical analysis.")
+
