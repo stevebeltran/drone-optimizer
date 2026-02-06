@@ -11,7 +11,7 @@ import itertools
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
-st.title("🛰️ High-Performance Drone Optimizer")
+st.title("🛰️ brinc COS Drone Optimizer")
 
 # --- UPLOAD SECTION ---
 if 'files_ready' not in st.session_state:
@@ -196,4 +196,5 @@ if call_data and station_data and len(shape_components) >= 3:
         st.error(f"Analysis Error: {e}")
 else:
     st.info("👋 Upload data files to begin tactical analysis.")
+
 
