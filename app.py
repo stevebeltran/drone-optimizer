@@ -3,7 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import plotly.graph_objects as go
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon, MultiPolygon
 from shapely.ops import unary_union
 import os
 import shutil
@@ -18,10 +18,9 @@ if 'files_ready' not in st.session_state:
     st.session_state['files_ready'] = False
 
 with st.expander("📁 Upload Data Files", expanded=not st.session_state['files_ready']):
-    uploaded_files = st.file_uploader("Drop all 6 files here (calls.csv, stations.csv, and 4 Shapefile components)", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Drop all 6 files here", accept_multiple_files=True)
 
-# High-Contrast "Heavy" Palette - Specifically chosen for light maps
-# Removed all light/pastel/turquoise colors.
+# High-Contrast "Heavy" Palette
 STATION_COLORS = [
     "#E6194B", "#3CB44B", "#4363D8", "#F58231", "#911EB4", 
     "#800000", "#333333", "#000075", "#808000", "#9A6324", 
@@ -58,7 +57,6 @@ if call_data and station_data and len(shape_components) >= 3:
         if city_gdf_all.crs is None: city_gdf_all.set_crs(epsg=4269, inplace=True)
         city_list = sorted(city_gdf_all['NAME'].unique())
         
-        # Default to Boston or Benton based on contents
         default_ix = city_list.index("Boston") if "Boston" in city_list else (city_list.index("Benton") if "Benton" in city_list else 0)
         
         st.markdown("---")
@@ -105,12 +103,10 @@ if call_data and station_data and len(shape_components) >= 3:
         
         with st.spinner("Analyzing optimal placements..."):
             for combo in combos:
-                # Call Coverage Optimization
                 union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
                 if len(union_set) > max_calls:
                     max_calls = len(union_set); best_call_combo = combo
                 
-                # Area Coverage Optimization
                 union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
                 if union_geo.area > max_area:
                     max_area = union_geo.area; best_geo_combo = combo
@@ -158,22 +154,23 @@ if call_data and station_data and len(shape_components) >= 3:
         # --- THE MAP ---
         fig = go.Figure()
         
-        # 1. City Boundary
-        bx, by = city_boundary.exterior.coords.xy
-        fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
+        # 1. FIX FOR MULTIPOLYGON: Handle city boundary correctly
+        def add_boundary_to_map(geom):
+            if isinstance(geom, Polygon):
+                bx, by = geom.exterior.coords.xy
+                fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
+            elif isinstance(geom, MultiPolygon):
+                for poly in geom.geoms:
+                    bx, by = poly.exterior.coords.xy
+                    fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
+
+        add_boundary_to_map(city_boundary)
         
         # 2. Service Calls (Midnight Blue)
         if len(calls_in_city) > 0:
             sample_size = min(5000, len(calls_in_city))
             calls_map = calls_in_city.to_crs(epsg=4326).sample(sample_size)
-            fig.add_trace(go.Scattermap(
-                lat=calls_map.geometry.y, 
-                lon=calls_map.geometry.x, 
-                mode='markers', 
-                marker=dict(size=4, color='#000080', opacity=0.35), # Deep Midnight Blue
-                name="Incident Data", 
-                hoverinfo='skip'
-            ))
+            fig.add_trace(go.Scattermap(lat=calls_map.geometry.y, lon=calls_map.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
         
         # 3. Stations & Heavy Rings
         all_names = df_stations_all['name'].tolist()
@@ -186,17 +183,13 @@ if call_data and station_data and len(shape_components) >= 3:
                     lon=list(clons) + [None, s['lon']], 
                     mode='lines+markers', 
                     marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
-                    line=dict(color=color, width=4.5), # Increased width for contrast
+                    line=dict(color=color, width=4.5), 
                     fill='toself', fillcolor='rgba(0,0,0,0)', 
                     name=f"{s['name']}",
                     hoverinfo='name'
                 ))
 
-        fig.update_layout(
-            map_style="open-street-map", map_zoom=12, 
-            map_center={"lat": city_boundary.centroid.y, "lon": city_boundary.centroid.x}, 
-            margin={"r":0,"t":0,"l":0,"b":0}, height=800
-        )
+        fig.update_layout(map_style="open-street-map", map_zoom=12, map_center={"lat": city_boundary.centroid.y, "lon": city_boundary.centroid.x}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
         st.plotly_chart(fig, width='stretch')
 
     except Exception as e:
