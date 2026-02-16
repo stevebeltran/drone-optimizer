@@ -17,8 +17,6 @@ st.title("🛰️ brinc COS Drone Optimizer")
 if 'files_ready' not in st.session_state:
     st.session_state['files_ready'] = False
 
-# Expander state is controlled by 'files_ready'. 
-# When files_ready becomes True, 'expanded' becomes False (Closed).
 with st.expander("📁 Upload Data Files", expanded=not st.session_state['files_ready']):
     uploaded_files = st.file_uploader("Drop all 6 files here", accept_multiple_files=True)
 
@@ -49,17 +47,13 @@ if uploaded_files:
 if call_data and station_data and len(shape_components) >= 3:
     
     # --- AUTO-CLOSE LOGIC ---
-    # If files are valid but the UI still thinks we aren't ready,
-    # update state and FORCE RERUN to close the upload box immediately.
     if not st.session_state['files_ready']:
         st.session_state['files_ready'] = True
         st.rerun()
 
-    # Create temp directory for shapefiles
     if not os.path.exists("temp"): 
         os.mkdir("temp")
     else:
-        # Clear temp dir to prevent old files from persisting
         shutil.rmtree("temp")
         os.mkdir("temp")
 
@@ -73,7 +67,6 @@ if call_data and station_data and len(shape_components) >= 3:
         city_gdf_all = gpd.read_file(shp_path)
         if city_gdf_all.crs is None: city_gdf_all.set_crs(epsg=4269, inplace=True)
         
-        # Determine name column (sometimes it's NAME, sometimes DISTRICT, etc)
         name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_gdf_all.columns), city_gdf_all.columns[0])
         city_list = sorted(city_gdf_all[name_col].astype(str).unique())
         
@@ -86,11 +79,9 @@ if call_data and station_data and len(shape_components) >= 3:
         city_gdf = city_gdf_all[city_gdf_all[name_col] == target_city].to_crs(epsg=4326)
         city_boundary = city_gdf.iloc[0].geometry
         
-        # UTM Projection Calculation
         utm_zone = int((city_boundary.centroid.x + 180) / 6) + 1
         epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
         
-        # Use union_all() for modern Geopandas compatibility
         city_m = city_gdf.to_crs(epsg=epsg_code).geometry.union_all()
         
         # 2. LOAD DATA
@@ -119,6 +110,9 @@ if call_data and station_data and len(shape_components) >= 3:
         st.sidebar.header("🎯 Optimizer Controls")
         k = st.sidebar.slider("Number of Stations to Deploy", 1, len(station_metadata), min(2, len(station_metadata)))
         
+        # --- NEW TOGGLE HERE ---
+        show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
+        
         combos = list(itertools.combinations(range(len(station_metadata)), k))
         if len(combos) > 2000: combos = combos[:2000]
         
@@ -131,7 +125,6 @@ if call_data and station_data and len(shape_components) >= 3:
                 if len(union_set) > max_calls:
                     max_calls = len(union_set); best_call_combo = combo
                 
-                # unary_union is still valid for lists of shapely objects
                 union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
                 if union_geo.area > max_area:
                     max_area = union_geo.area; best_geo_combo = combo
@@ -170,10 +163,27 @@ if call_data and station_data and len(shape_components) >= 3:
                     if not over.is_empty: inters.append(over)
             overlap_perc = (unary_union(inters).area / city_m.area * 100) if inters else 0.0
         
-        # --- METRICS BAR ---
         st.markdown("---")
+
+        # --- HEALTH SCORE LOGIC (Controlled by Toggle) ---
+        if show_health:
+            # Formula: 50% Capacity + 25% Coverage + 25% Redundancy
+            norm_redundancy = min(overlap_perc / 35.0, 1.0) * 100
+            health_score = (calls_covered_perc * 0.50) + (area_covered_perc * 0.25) + (norm_redundancy * 0.25)
+
+            if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
+            elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
+            elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
+            else: h_color, h_label = "#dc3545", "CRITICAL"
+
+            st.markdown(f"""
+                <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 1.2em; font-weight: bold;">Department Health Score: {health_score:.1f}%</span>
+                    <span style="font-size: 1.1em; background: rgba(0,0,0,0.2); padding: 2px 10px; border-radius: 4px;">{h_label}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
         m1, m2, m3, m4 = st.columns(4)
-        # METRIC 1: Total Calls Displayed Here
         m1.metric("Total Incident Points", f"{len(calls_in_city):,}")
         m2.metric("Response Capacity %", f"{calls_covered_perc:.1f}%")
         m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
@@ -182,7 +192,6 @@ if call_data and station_data and len(shape_components) >= 3:
         # --- THE MAP ---
         fig = go.Figure()
         
-        # 1. FIX FOR MULTIPOLYGON: Handle city boundary correctly
         def add_boundary_to_map(geom):
             if isinstance(geom, Polygon):
                 bx, by = geom.exterior.coords.xy
@@ -194,13 +203,11 @@ if call_data and station_data and len(shape_components) >= 3:
 
         add_boundary_to_map(city_boundary)
         
-        # 2. Service Calls (Midnight Blue)
         if len(calls_in_city) > 0:
             sample_size = min(5000, len(calls_in_city))
             calls_map = calls_in_city.to_crs(epsg=4326).sample(sample_size)
             fig.add_trace(go.Scattermap(lat=calls_map.geometry.y, lon=calls_map.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
         
-        # 3. Stations & Heavy Rings
         all_names = df_stations_all['name'].tolist()
         for i, s in enumerate(station_metadata):
             if s['name'] in active_names:
