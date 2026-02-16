@@ -108,43 +108,55 @@ if call_data and station_data and len(shape_components) >= 3:
 
         # --- 4. OPTIMIZER ---
         st.sidebar.header("🎯 Optimizer Controls")
-        k = st.sidebar.slider("Number of Stations to Deploy", 1, len(station_metadata), min(2, len(station_metadata)))
         
-        # --- NEW TOGGLE HERE ---
+        # NEW STRATEGY SWITCH
+        opt_strategy = st.sidebar.radio(
+            "Optimization Goal:",
+            ("Maximize Call Coverage", "Maximize Land Coverage"),
+            index=0
+        )
+        
+        k = st.sidebar.slider("Number of Stations to Deploy", 1, len(station_metadata), min(2, len(station_metadata)))
         show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
         
         combos = list(itertools.combinations(range(len(station_metadata)), k))
         if len(combos) > 2000: combos = combos[:2000]
         
-        best_call_combo, max_calls = None, -1
-        best_geo_combo, max_area = None, -1
+        best_combo = None
+        max_val = -1
         
-        with st.spinner("Analyzing optimal placements..."):
+        with st.spinner(f"Optimizing for {opt_strategy}..."):
             for combo in combos:
-                union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
-                if len(union_set) > max_calls:
-                    max_calls = len(union_set); best_call_combo = combo
+                if opt_strategy == "Maximize Call Coverage":
+                    # Optimize for Calls (Points)
+                    union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
+                    val = len(union_set)
+                else:
+                    # Optimize for Land (Area)
+                    union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
+                    val = union_geo.area
                 
-                union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
-                if union_geo.area > max_area:
-                    max_area = union_geo.area; best_geo_combo = combo
+                if val > max_val:
+                    max_val = val
+                    best_combo = combo
             
-            best_call_names = [station_metadata[i]['name'] for i in best_call_combo]
-            best_geo_names = [station_metadata[i]['name'] for i in best_geo_combo]
+            best_names = [station_metadata[i]['name'] for i in best_combo]
 
-        # --- SIDEBAR RANKINGS ---
+        # --- SIDEBAR RANKINGS (Dynamic based on Strategy) ---
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🏆 Best for Call Response")
-        for name in best_call_names: st.sidebar.write(f"✅ {name}")
-        st.sidebar.caption(f"Covers {max_calls:,} total incident points")
-
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("🌍 Best for Land Coverage")
-        for name in best_geo_names: st.sidebar.write(f"📍 {name}")
-        st.sidebar.caption(f"Covers {(max_area/city_m.area)*100:.1f}% of total area")
+        if opt_strategy == "Maximize Call Coverage":
+            st.sidebar.subheader("🏆 Optimal Stations (Calls)")
+            caption_text = f"Covers {max_val:,} total incident points"
+        else:
+            st.sidebar.subheader("🌍 Optimal Stations (Land)")
+            caption_text = f"Covers {(max_val/city_m.area)*100:.1f}% of total area"
+            
+        for name in best_names: st.sidebar.write(f"✅ {name}")
+        st.sidebar.caption(caption_text)
 
         # --- MAIN INTERFACE ---
-        active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_call_names)
+        # Default selection is now tied to the strategy result
+        active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_names)
         
         area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
         if active_names:
@@ -165,9 +177,8 @@ if call_data and station_data and len(shape_components) >= 3:
         
         st.markdown("---")
 
-        # --- HEALTH SCORE LOGIC (Controlled by Toggle) ---
+        # --- HEALTH SCORE LOGIC ---
         if show_health:
-            # Formula: 50% Capacity + 25% Coverage + 25% Redundancy
             norm_redundancy = min(overlap_perc / 35.0, 1.0) * 100
             health_score = (calls_covered_perc * 0.50) + (area_covered_perc * 0.25) + (norm_redundancy * 0.25)
 
