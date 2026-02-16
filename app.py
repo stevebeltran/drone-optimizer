@@ -62,20 +62,55 @@ if call_data and station_data and len(shape_components) >= 3:
             buffer.write(f.getbuffer())
     
     try:
-        # 1. LOAD GEOGRAPHY
+        # 1. LOAD DATA EARLY (For Auto-Detection)
+        df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
+        df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
+
+        # 2. LOAD GEOGRAPHY
         shp_path = [os.path.join("temp", f.name) for f in shape_components if f.name.endswith('.shp')][0]
         city_gdf_all = gpd.read_file(shp_path)
         if city_gdf_all.crs is None: city_gdf_all.set_crs(epsg=4269, inplace=True)
         
+        # Determine name column
         name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_gdf_all.columns), city_gdf_all.columns[0])
         city_list = sorted(city_gdf_all[name_col].astype(str).unique())
         
-        default_ix = city_list.index("Boston") if "Boston" in city_list else 0
+        # --- AUTO-DETECT JURISDICTION ---
+        # Calculate the centroid of the uploaded call data
+        avg_lat = df_calls['lat'].mean()
+        avg_lon = df_calls['lon'].mean()
+        center_point = Point(avg_lon, avg_lat)
         
+        # Find which polygon contains this center point
+        # Ensure we check in the same CRS (EPSG:4269 matches standard lat/lon usually)
+        detected_row = city_gdf_all[city_gdf_all.contains(center_point)]
+        
+        if not detected_row.empty:
+            detected_name = detected_row.iloc[0][name_col]
+            # Set default index to the detected name
+            if detected_name in city_list:
+                default_ix = city_list.index(detected_name)
+                auto_msg = f"✅ Auto-detected Area: **{detected_name}**"
+            else:
+                default_ix = 0
+                auto_msg = "⚠️ Area detected but name mismatch."
+        else:
+            # Fallback: Find closest polygon if point is slightly outside (e.g. in water)
+            # Simple distance check to centroids
+            city_gdf_all['dist'] = city_gdf_all.geometry.centroid.distance(center_point)
+            closest_row = city_gdf_all.sort_values('dist').iloc[0]
+            detected_name = closest_row[name_col]
+            default_ix = city_list.index(detected_name)
+            auto_msg = f"📍 Closest Area Detected: **{detected_name}**"
+
         st.markdown("---")
         ctrl_col1, ctrl_col2 = st.columns([1, 2])
-        target_city = ctrl_col1.selectbox("📍 Jurisdiction", city_list, index=default_ix)
         
+        # Select box defaults to the auto-detected index
+        target_city = ctrl_col1.selectbox("📍 Jurisdiction", city_list, index=default_ix)
+        ctrl_col1.caption(auto_msg) # Show user confirmation of what happened
+        
+        # Filter Geometry
         city_gdf = city_gdf_all[city_gdf_all[name_col] == target_city].to_crs(epsg=4326)
         city_boundary = city_gdf.iloc[0].geometry
         
@@ -84,10 +119,7 @@ if call_data and station_data and len(shape_components) >= 3:
         
         city_m = city_gdf.to_crs(epsg=epsg_code).geometry.union_all()
         
-        # 2. LOAD DATA
-        df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
-        df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
-        
+        # Prepare GeoDataFrames
         gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
         calls_in_city = gdf_calls[gdf_calls.within(city_boundary)].to_crs(epsg=epsg_code)
         calls_in_city['point_idx'] = range(len(calls_in_city))
@@ -109,7 +141,6 @@ if call_data and station_data and len(shape_components) >= 3:
         # --- 4. OPTIMIZER ---
         st.sidebar.header("🎯 Optimizer Controls")
         
-        # NEW STRATEGY SWITCH
         opt_strategy = st.sidebar.radio(
             "Optimization Goal:",
             ("Maximize Call Coverage", "Maximize Land Coverage"),
@@ -128,11 +159,9 @@ if call_data and station_data and len(shape_components) >= 3:
         with st.spinner(f"Optimizing for {opt_strategy}..."):
             for combo in combos:
                 if opt_strategy == "Maximize Call Coverage":
-                    # Optimize for Calls (Points)
                     union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
                     val = len(union_set)
                 else:
-                    # Optimize for Land (Area)
                     union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
                     val = union_geo.area
                 
@@ -142,7 +171,7 @@ if call_data and station_data and len(shape_components) >= 3:
             
             best_names = [station_metadata[i]['name'] for i in best_combo]
 
-        # --- SIDEBAR RANKINGS (Dynamic based on Strategy) ---
+        # --- SIDEBAR RANKINGS ---
         st.sidebar.markdown("---")
         if opt_strategy == "Maximize Call Coverage":
             st.sidebar.subheader("🏆 Optimal Stations (Calls)")
@@ -155,7 +184,6 @@ if call_data and station_data and len(shape_components) >= 3:
         st.sidebar.caption(caption_text)
 
         # --- MAIN INTERFACE ---
-        # Default selection is now tied to the strategy result
         active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_names)
         
         area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
@@ -177,7 +205,7 @@ if call_data and station_data and len(shape_components) >= 3:
         
         st.markdown("---")
 
-        # --- HEALTH SCORE LOGIC ---
+        # --- HEALTH SCORE ---
         if show_health:
             norm_redundancy = min(overlap_perc / 35.0, 1.0) * 100
             health_score = (calls_covered_perc * 0.50) + (area_covered_perc * 0.25) + (norm_redundancy * 0.25)
