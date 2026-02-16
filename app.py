@@ -17,6 +17,8 @@ st.title("🛰️ brinc COS Drone Optimizer")
 if 'files_ready' not in st.session_state:
     st.session_state['files_ready'] = False
 
+# Expander state is controlled by 'files_ready'. 
+# When files_ready becomes True, 'expanded' becomes False (Closed).
 with st.expander("📁 Upload Data Files", expanded=not st.session_state['files_ready']):
     uploaded_files = st.file_uploader("Drop all 6 files here", accept_multiple_files=True)
 
@@ -35,17 +37,32 @@ def get_circle_coords(lat, lon, r_mi=2):
 
 # --- FILE ROUTING ---
 call_data, station_data, shape_components = None, None, []
-for f in uploaded_files:
-    fname = f.name.lower()
-    if fname == "calls.csv": call_data = f
-    elif fname == "stations.csv": station_data = f
-    elif any(fname.endswith(ext) for ext in ['.shp', '.shx', '.dbf', '.prj']):
-        shape_components.append(f)
+if uploaded_files:
+    for f in uploaded_files:
+        fname = f.name.lower()
+        if fname == "calls.csv": call_data = f
+        elif fname == "stations.csv": station_data = f
+        elif any(fname.endswith(ext) for ext in ['.shp', '.shx', '.dbf', '.prj']):
+            shape_components.append(f)
 
+# --- MAIN LOGIC ---
 if call_data and station_data and len(shape_components) >= 3:
-    st.session_state['files_ready'] = True
-    if os.path.exists("temp"): shutil.rmtree("temp")
-    os.mkdir("temp")
+    
+    # --- AUTO-CLOSE LOGIC ---
+    # If files are valid but the UI still thinks we aren't ready,
+    # update state and FORCE RERUN to close the upload box immediately.
+    if not st.session_state['files_ready']:
+        st.session_state['files_ready'] = True
+        st.rerun()
+
+    # Create temp directory for shapefiles
+    if not os.path.exists("temp"): 
+        os.mkdir("temp")
+    else:
+        # Clear temp dir to prevent old files from persisting
+        shutil.rmtree("temp")
+        os.mkdir("temp")
+
     for f in shape_components:
         with open(os.path.join("temp", f.name), "wb") as buffer:
             buffer.write(f.getbuffer())
@@ -55,19 +72,26 @@ if call_data and station_data and len(shape_components) >= 3:
         shp_path = [os.path.join("temp", f.name) for f in shape_components if f.name.endswith('.shp')][0]
         city_gdf_all = gpd.read_file(shp_path)
         if city_gdf_all.crs is None: city_gdf_all.set_crs(epsg=4269, inplace=True)
-        city_list = sorted(city_gdf_all['NAME'].unique())
         
-        default_ix = city_list.index("Boston") if "Boston" in city_list else (city_list.index("Benton") if "Benton" in city_list else 0)
+        # Determine name column (sometimes it's NAME, sometimes DISTRICT, etc)
+        name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_gdf_all.columns), city_gdf_all.columns[0])
+        city_list = sorted(city_gdf_all[name_col].astype(str).unique())
+        
+        default_ix = city_list.index("Boston") if "Boston" in city_list else 0
         
         st.markdown("---")
         ctrl_col1, ctrl_col2 = st.columns([1, 2])
         target_city = ctrl_col1.selectbox("📍 Jurisdiction", city_list, index=default_ix)
         
-        city_gdf = city_gdf_all[city_gdf_all['NAME'] == target_city].to_crs(epsg=4326)
+        city_gdf = city_gdf_all[city_gdf_all[name_col] == target_city].to_crs(epsg=4326)
         city_boundary = city_gdf.iloc[0].geometry
+        
+        # UTM Projection Calculation
         utm_zone = int((city_boundary.centroid.x + 180) / 6) + 1
         epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
-        city_m = city_gdf.to_crs(epsg=epsg_code).iloc[0].geometry
+        
+        # Use union_all() for modern Geopandas compatibility
+        city_m = city_gdf.to_crs(epsg=epsg_code).geometry.union_all()
         
         # 2. LOAD DATA
         df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
@@ -107,6 +131,7 @@ if call_data and station_data and len(shape_components) >= 3:
                 if len(union_set) > max_calls:
                     max_calls = len(union_set); best_call_combo = combo
                 
+                # unary_union is still valid for lists of shapely objects
                 union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
                 if union_geo.area > max_area:
                     max_area = union_geo.area; best_geo_combo = combo
@@ -133,6 +158,7 @@ if call_data and station_data and len(shape_components) >= 3:
             active_data = [s for s in station_metadata if s['name'] in active_names]
             active_buffers = [s['clipped_m'] for s in active_data]
             active_indices = [s['indices'] for s in active_data]
+            
             area_covered_perc = (unary_union(active_buffers).area / city_m.area) * 100
             if len(calls_in_city) > 0:
                 calls_covered_perc = (len(set().union(*active_indices)) / len(calls_in_city)) * 100
@@ -144,8 +170,10 @@ if call_data and station_data and len(shape_components) >= 3:
                     if not over.is_empty: inters.append(over)
             overlap_perc = (unary_union(inters).area / city_m.area * 100) if inters else 0.0
         
+        # --- METRICS BAR ---
         st.markdown("---")
         m1, m2, m3, m4 = st.columns(4)
+        # METRIC 1: Total Calls Displayed Here
         m1.metric("Total Incident Points", f"{len(calls_in_city):,}")
         m2.metric("Response Capacity %", f"{calls_covered_perc:.1f}%")
         m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
@@ -196,5 +224,3 @@ if call_data and station_data and len(shape_components) >= 3:
         st.error(f"Analysis Error: {e}")
 else:
     st.info("👋 Upload data files to begin tactical analysis.")
-
-
