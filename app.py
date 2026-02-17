@@ -70,7 +70,7 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     
     all_points = pd.concat(points_list)
     
-    # Create GeoDataFrame locally inside the function
+    # Create GeoDataFrame locally inside the function (Safe for caching)
     points_gdf = gpd.GeoDataFrame(
         all_points, 
         geometry=gpd.points_from_xy(all_points.lon, all_points.lat), 
@@ -182,7 +182,11 @@ if call_data and station_data:
     epsg_code = f"326{utm_zone}" if centroid.y > 0 else f"327{utm_zone}"
     
     # Project city geometry to UTM
-    city_m = active_gdf.to_crs(epsg=epsg_code).geometry.union_all() if hasattr(active_gdf.geometry, 'union_all') else unary_union(active_gdf.to_crs(epsg=epsg_code).geometry)
+    # Handle union_all depending on GeoPandas version
+    if hasattr(active_gdf.geometry, 'union_all'):
+        city_m = active_gdf.to_crs(epsg=epsg_code).geometry.union_all()
+    else:
+        city_m = unary_union(active_gdf.to_crs(epsg=epsg_code).geometry)
     
     # Prepare Calls
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
