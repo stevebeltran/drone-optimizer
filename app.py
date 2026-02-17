@@ -16,7 +16,26 @@ st.title("🛰️ brinc COS Drone Optimizer")
 # --- CONFIGURATION ---
 SHAPEFILE_DIR = "jurisdiction_data" 
 
-# --- UPLOAD SECTION ---
+# Ensure the directory exists
+if not os.path.exists(SHAPEFILE_DIR):
+    os.makedirs(SHAPEFILE_DIR)
+
+# --- SIDEBAR: MAP LIBRARY MANAGER ---
+with st.sidebar.expander("🗺️ Map Library Manager"):
+    st.write("Upload shapefiles here to populate the 'jurisdiction_data' folder.")
+    # Allow uploading map files to save them permanently (for this session)
+    map_files = st.file_uploader("Drop .shp, .shx, .dbf, .prj files", accept_multiple_files=True)
+    
+    if map_files:
+        count = 0
+        for f in map_files:
+            # Save the file to the jurisdiction_data folder
+            with open(os.path.join(SHAPEFILE_DIR, f.name), "wb") as buffer:
+                buffer.write(f.getbuffer())
+            count += 1
+        st.success(f"Saved {count} map files to library!")
+
+# --- MAIN UPLOAD SECTION (CSVs ONLY) ---
 if 'csvs_ready' not in st.session_state:
     st.session_state['csvs_ready'] = False
 
@@ -35,19 +54,22 @@ def get_circle_coords(lat, lon, r_mi=2):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
-# --- FIXED FUNCTION: Accepts Lat/Lon (Floats) instead of Point Object ---
 @st.cache_data
 def load_and_match_shapefile(lon, lat, shapefile_dir):
     """
     Optimized Scanner: Checks bounding boxes first.
     Recreates the Point object internally to avoid Streamlit hashing errors.
     """
-    center_point = Point(lon, lat) # <--- Recreate Point here
+    center_point = Point(lon, lat)
     
+    # Check if folder exists and has files
+    if not os.path.exists(shapefile_dir):
+        return None, None, f"Folder '{shapefile_dir}' does not exist."
+        
     shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
     
     if not shp_files:
-        return None, None, "No shapefiles found in 'jurisdiction_data' folder."
+        return None, None, f"No .shp files found in '{shapefile_dir}'. Please upload maps in the sidebar."
 
     # 1. Fast Scan (Bounding Box Check)
     candidate_files = []
@@ -109,15 +131,13 @@ if call_data and station_data:
 
     avg_lat = df_calls['lat'].mean()
     avg_lon = df_calls['lon'].mean()
-    # Note: We pass floats to the function now, not the Point object
     
     with st.spinner("🌍 Scanning map library..."):
-        # --- FIXED CALL: Passing floats (lon, lat) ---
         city_gdf_all, city_boundary_row, match_source = load_and_match_shapefile(avg_lon, avg_lat, SHAPEFILE_DIR)
 
     if city_gdf_all is None:
         st.error(f"❌ Auto-Detection Failed: {match_source}")
-        st.info("Ensure your 'jurisdiction_data' folder contains the correct .shp files and they cover your call data location.")
+        st.warning("Go to the **Sidebar > Map Library Manager** and upload your shapefiles (.shp, .shx, .dbf, .prj).")
         st.stop()
 
     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_boundary_row.index), city_boundary_row.index[0])
