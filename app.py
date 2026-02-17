@@ -35,12 +35,15 @@ def get_circle_coords(lat, lon, r_mi=2):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
+# --- FIXED FUNCTION: Accepts Lat/Lon (Floats) instead of Point Object ---
 @st.cache_data
-def load_and_match_shapefile(center_point, shapefile_dir):
+def load_and_match_shapefile(lon, lat, shapefile_dir):
     """
-    Optimized Scanner: Checks bounding boxes first to avoid loading 
-    massive files for states we aren't currently in.
+    Optimized Scanner: Checks bounding boxes first.
+    Recreates the Point object internally to avoid Streamlit hashing errors.
     """
+    center_point = Point(lon, lat) # <--- Recreate Point here
+    
     shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
     
     if not shp_files:
@@ -50,14 +53,10 @@ def load_and_match_shapefile(center_point, shapefile_dir):
     candidate_files = []
     for shp_path in shp_files:
         try:
-            # Read only the bounds/metadata first (Very Fast)
+            # Read only the bounds/metadata first
             info = gpd.read_file(shp_path, rows=1) 
             if info.crs is None: info.set_crs(epsg=4269, inplace=True)
             info = info.to_crs(epsg=4326)
-            
-            # Rough check: Is our point roughly in the total bounds of this file?
-            # We read the whole file bounds using a lighter method if possible, 
-            # but for simplicity, we load the file with a spatial filter in step 2.
             candidate_files.append(shp_path)
         except:
             continue
@@ -66,26 +65,20 @@ def load_and_match_shapefile(center_point, shapefile_dir):
     for shp_path in candidate_files:
         try:
             # Load file using a "bbox" filter to only load relevant geometry
-            # This prevents loading "Texas" if we are in "Maine"
             gdf = gpd.read_file(shp_path, bbox=center_point)
             
             if not gdf.empty:
-                # If we got data back, it means the point is inside this file's bounding box
-                # Now verify exact polygon containment
                 if gdf.crs is None: gdf.set_crs(epsg=4269, inplace=True)
                 gdf = gdf.to_crs(epsg=4326)
                 
                 matching_row = gdf[gdf.contains(center_point)]
                 
                 if not matching_row.empty:
-                    # Found it! Now we must load the REST of the file (for context/map display)
-                    # We reload the full file because the previous read was filtered to just 1 point
+                    # Reload full file for context
                     full_gdf = gpd.read_file(shp_path)
                     if full_gdf.crs is None: full_gdf.set_crs(epsg=4269, inplace=True)
                     full_gdf = full_gdf.to_crs(epsg=4326)
                     
-                    # Find the specific row in the full GDF
-                    # We match based on the first unique ID column we find
                     id_col = next((c for c in ['GEOID', 'COUSUBFP', 'NAME'] if c in matching_row.columns), matching_row.columns[0])
                     match_val = matching_row.iloc[0][id_col]
                     full_row = full_gdf[full_gdf[id_col] == match_val].iloc[0]
@@ -116,14 +109,15 @@ if call_data and station_data:
 
     avg_lat = df_calls['lat'].mean()
     avg_lon = df_calls['lon'].mean()
-    center_point = Point(avg_lon, avg_lat)
-
+    # Note: We pass floats to the function now, not the Point object
+    
     with st.spinner("🌍 Scanning map library..."):
-        city_gdf_all, city_boundary_row, match_source = load_and_match_shapefile(center_point, SHAPEFILE_DIR)
+        # --- FIXED CALL: Passing floats (lon, lat) ---
+        city_gdf_all, city_boundary_row, match_source = load_and_match_shapefile(avg_lon, avg_lat, SHAPEFILE_DIR)
 
     if city_gdf_all is None:
         st.error(f"❌ Auto-Detection Failed: {match_source}")
-        st.info("Ensure your 'jurisdiction_data' folder contains the correct .shp files.")
+        st.info("Ensure your 'jurisdiction_data' folder contains the correct .shp files and they cover your call data location.")
         st.stop()
 
     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_boundary_row.index), city_boundary_row.index[0])
