@@ -15,8 +15,6 @@ st.title("🛰️ brinc COS Drone Optimizer")
 
 # --- CONFIGURATION ---
 SHAPEFILE_DIR = "jurisdiction_data" 
-
-# Ensure the directory exists
 if not os.path.exists(SHAPEFILE_DIR):
     os.makedirs(SHAPEFILE_DIR)
 
@@ -24,7 +22,6 @@ if not os.path.exists(SHAPEFILE_DIR):
 with st.sidebar.expander("🗺️ Map Library Manager"):
     st.write("Upload shapefiles here to populate the 'jurisdiction_data' folder.")
     map_files = st.file_uploader("Drop .shp, .shx, .dbf, .prj files", accept_multiple_files=True)
-    
     if map_files:
         count = 0
         for f in map_files:
@@ -53,38 +50,44 @@ def get_circle_coords(lat, lon, r_mi=2):
     return c_lats, c_lons
 
 @st.cache_data
-def consolidate_jurisdictions(calls_df, shapefile_dir):
+def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     """
-    Multi-Jurisdiction Scanner:
-    1. Creates a bounding box around all calls.
-    2. Checks ALL shapefiles in the library.
-    3. Keeps any polygon that intersects with the call data.
-    4. Returns a single concatenated GeoDataFrame of all matches.
+    Strict Matcher:
+    1. Combines Calls + Stations into one 'Points' layer.
+    2. Checks every polygon in every shapefile.
+    3. DISCARDS any polygon that does not contain at least 1 point.
     """
-    # Create a GeoDataFrame of the calls (for spatial join)
-    calls_gdf = gpd.GeoDataFrame(
-        calls_df, 
-        geometry=gpd.points_from_xy(calls_df.lon, calls_df.lat), 
+    # 1. Prepare Points (Calls + Stations)
+    points_list = []
+    if calls_df is not None:
+        points_list.append(calls_df[['lat', 'lon']])
+    if stations_df is not None:
+        points_list.append(stations_df[['lat', 'lon']])
+        
+    if not points_list: return None, "No data points found."
+    
+    all_points = pd.concat(points_list)
+    points_gdf = gpd.GeoDataFrame(
+        all_points, 
+        geometry=gpd.points_from_xy(all_points.lon, all_points.lat), 
         crs="EPSG:4326"
     )
     
-    # Get total bounds of calls to filter which files we even look at
-    # (minx, miny, maxx, maxy)
-    total_bounds = calls_gdf.total_bounds
-    
+    # 2. Scan Library
+    shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
+    if not shp_files: return None, "No shapefiles found in library."
+
     matched_gdfs = []
     detected_sources = []
     
-    shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
+    # Pre-calculate bounds for faster initial filtering
+    total_bounds = points_gdf.total_bounds # (minx, miny, maxx, maxy)
     
-    if not shp_files:
-        return None, "No shapefiles found in library."
-
     for shp_path in shp_files:
         try:
-            # 1. Bbox Filter: Read file only if it overlaps with our calls area
-            # We assume the shapefile is likely EPSG:4269 or 4326.
-            # reading with bbox forces an intersection check immediately.
+            # A. Fast Bbox Filter (Check file overlap)
+            # We assume CRS 4269 (NAD83) or 4326 (WGS84) usually.
+            # We read with bbox to strictly limit what we load from disk.
             gdf_chunk = gpd.read_file(shp_path, bbox=tuple(total_bounds))
             
             if not gdf_chunk.empty:
@@ -92,16 +95,16 @@ def consolidate_jurisdictions(calls_df, shapefile_dir):
                 if gdf_chunk.crs is None: gdf_chunk.set_crs(epsg=4269, inplace=True)
                 gdf_chunk = gdf_chunk.to_crs(epsg=4326)
                 
-                # 2. Precise Filter: Keep only polygons that actually contain calls
-                # We use a spatial join (sjoin) for speed
-                matches = gpd.sjoin(gdf_chunk, calls_gdf, how="inner", predicate="contains")
+                # B. Strict Spatial Join (Point-in-Polygon)
+                # This drops any polygon that doesn't intersect with our points
+                matches = gpd.sjoin(gdf_chunk, points_gdf, how="inner", predicate="intersects")
                 
-                # Get the unique polygons that had matches
-                valid_indices = matches.index.unique()
-                final_polys = gdf_chunk.loc[valid_indices].copy()
-                
-                if not final_polys.empty:
-                    # Normalize the Name Column for the dropdown
+                if not matches.empty:
+                    # Get the unique polygons that actually matched
+                    valid_indices = matches.index.unique()
+                    final_polys = gdf_chunk.loc[valid_indices].copy()
+                    
+                    # Normalize Name Column
                     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in final_polys.columns), final_polys.columns[0])
                     final_polys['DISPLAY_NAME'] = final_polys[name_col].astype(str)
                     
@@ -111,9 +114,9 @@ def consolidate_jurisdictions(calls_df, shapefile_dir):
             continue
             
     if not matched_gdfs:
-        return None, "No matching geometry found."
+        return None, "No matching geometry found. Check if shapefiles cover the data area."
         
-    # Combine everything into one master map
+    # Combine matches
     master_gdf = pd.concat(matched_gdfs, ignore_index=True)
     return master_gdf, detected_sources
 
@@ -136,58 +139,49 @@ if call_data and station_data:
     df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
 
     # --- SCANNING ---
-    with st.spinner("🌍 Scanning library for multi-jurisdictional matches..."):
-        # We pass the dataframe, not points, to avoid hashing issues
-        master_gdf, match_sources = consolidate_jurisdictions(df_calls, SHAPEFILE_DIR)
+    with st.spinner("🌍 Identifying active jurisdictions..."):
+        master_gdf, match_sources = consolidate_jurisdictions(df_calls, df_stations_all, SHAPEFILE_DIR)
 
     if master_gdf is None:
         st.error(f"❌ Scan Failed: {match_sources}")
-        st.warning("Ensure your shapefiles cover the geographic area of your CSV data.")
+        st.info("Tip: Ensure your shapefiles (e.g. State/County maps) cover the coordinates in your CSV.")
         st.stop()
 
     # --- SIDEBAR NOTIFICATION ---
-    st.sidebar.success(f"**Auto-Detected {len(match_sources)} Files:**\n" + "\n".join([f"- {s}" for s in match_sources]))
+    st.sidebar.success(f"**Found Matches in:**\n" + "\n".join([f"- {s}" for s in match_sources]))
 
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
-    # --- COMBINED DROPDOWN ---
-    # We add a special "Combined" option at the top
+    # --- DROPDOWN SETUP ---
     available_areas = sorted(master_gdf['DISPLAY_NAME'].unique())
-    if len(available_areas) > 1:
-        dropdown_options = ["Combined (All Detected)"] + available_areas
-    else:
-        dropdown_options = available_areas
+    # Default to "Combined" if multiple, otherwise just the one found
+    dropdown_options = ["Combined (All Detected)"] + available_areas if len(available_areas) > 1 else available_areas
         
-    target_selection = ctrl_col1.selectbox("📍 Select Jurisdiction View", dropdown_options, index=0)
+    target_selection = ctrl_col1.selectbox("📍 Jurisdiction Filter", dropdown_options, index=0)
     
-    # Filter the Master GDF based on selection
+    # Filter Active GDF
     if target_selection == "Combined (All Detected)":
         active_gdf = master_gdf
     else:
         active_gdf = master_gdf[master_gdf['DISPLAY_NAME'] == target_selection]
 
-    # Process Active Boundary
-    # We assume 'active_gdf' is already EPSG:4326 from our loader function
-    # Combine all polygons in the view into one boundary
-    
-    # Use union_all() if available (newer Geopandas), else unary_union
+    # Process Boundary
     try:
         city_boundary_geom = active_gdf.geometry.union_all()
     except AttributeError:
         city_boundary_geom = unary_union(active_gdf.geometry)
         
-    # Calculate UTM automatically from centroid
+    # Automatic UTM Calculation
     centroid = city_boundary_geom.centroid
     utm_zone = int((centroid.x + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if centroid.y > 0 else f"327{utm_zone}"
     
-    # Project to Meters for Analysis
     city_m = active_gdf.to_crs(epsg=epsg_code).unary_union
     
-    # Prepare Call Data
+    # Prepare Calls
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
-    # Clip calls to the ACTIVE boundary (filters out calls not in the selected jurisdictions)
+    # Clip calls to currently selected boundary
     calls_in_city = gdf_calls[gdf_calls.within(city_boundary_geom)].to_crs(epsg=epsg_code)
     calls_in_city['point_idx'] = range(len(calls_in_city))
     
@@ -195,18 +189,13 @@ if call_data and station_data:
     radius_m = 3218.69 
     station_metadata = []
     
-    # We only process stations if we have calls in the area (optimization)
     if not calls_in_city.empty:
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
-            
-            # Fast distance check
             mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
             covered_indices = set(calls_in_city[mask]['point_idx'])
-            
             full_buf = s_pt_m.buffer(radius_m)
             clipped_buf = full_buf.intersection(city_m)
-            
             station_metadata.append({
                 'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
                 'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
@@ -221,17 +210,17 @@ if call_data and station_data:
         index=0
     )
     
-    # Safe slider max
     max_k = len(station_metadata) if station_metadata else 1
     k = st.sidebar.slider("Number of Stations to Deploy", 1, max_k, min(2, max_k) if max_k > 1 else 1)
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     
+    best_names = []
+    max_val = 0
     if len(station_metadata) > 0:
         combos = list(itertools.combinations(range(len(station_metadata)), k))
         if len(combos) > 2000: combos = combos[:2000]
         
         best_combo = None
-        max_val = -1
         
         with st.spinner(f"Optimizing for {opt_strategy}..."):
             for combo in combos:
@@ -246,10 +235,8 @@ if call_data and station_data:
                     max_val = val
                     best_combo = combo
             
-            best_names = [station_metadata[i]['name'] for i in best_combo]
-    else:
-        best_names = []
-        max_val = 0
+            if best_combo:
+                best_names = [station_metadata[i]['name'] for i in best_combo]
 
     # --- SIDEBAR RANKINGS ---
     st.sidebar.markdown("---")
@@ -313,7 +300,15 @@ if call_data and station_data:
 
     fig = go.Figure()
     
-    # Boundary Helper
+    # Helper to calculate dynamic zoom
+    def calculate_zoom(bounds):
+        minx, miny, maxx, maxy = bounds
+        # Simple heuristic for zoom level based on degree width
+        width = maxx - minx
+        if width <= 0: return 12
+        zoom = 10 - np.log(width)
+        return min(max(zoom, 10), 14) # Clamp between 10 and 14
+
     def add_boundary_to_map(geom):
         if isinstance(geom, Polygon):
             bx, by = geom.exterior.coords.xy
@@ -346,11 +341,13 @@ if call_data and station_data:
                 hoverinfo='name'
             ))
 
-    # Center map on the combined centroid
+    # Dynamic Map Center & Zoom
+    bounds = city_boundary_geom.bounds
     map_center_lat = city_boundary_geom.centroid.y
     map_center_lon = city_boundary_geom.centroid.x
+    dynamic_zoom = calculate_zoom(bounds)
 
-    fig.update_layout(map_style="open-street-map", map_zoom=10, map_center={"lat": map_center_lat, "lon": map_center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
+    fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": map_center_lat, "lon": map_center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
     st.plotly_chart(fig, width='stretch')
 
 else:
