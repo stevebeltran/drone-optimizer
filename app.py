@@ -143,6 +143,9 @@ if call_data and station_data:
     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_boundary_row.index), city_boundary_row.index[0])
     detected_name = city_boundary_row[name_col]
 
+    # --- MOVED: Notification to Sidebar ---
+    st.sidebar.success(f"Auto-loaded from **{match_source}**")
+
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
@@ -150,7 +153,7 @@ if call_data and station_data:
     default_ix = city_list.index(detected_name) if detected_name in city_list else 0
     
     target_city = ctrl_col1.selectbox("📍 Jurisdiction", city_list, index=default_ix)
-    ctrl_col1.success(f"Auto-loaded from **{match_source}**")
+    # Note: Removed the success message from here
 
     city_gdf = city_gdf_all[city_gdf_all[name_col] == target_city].to_crs(epsg=4326)
     city_boundary = city_gdf.iloc[0].geometry
