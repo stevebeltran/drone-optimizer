@@ -3,7 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import plotly.graph_objects as go
-from shapely.geometry import Point, Polygon, MultiPolygon
+from shapely.geometry import Point, Polygon, MultiPolygon, box
 from shapely.ops import unary_union
 import os
 import itertools
@@ -50,16 +50,12 @@ def get_circle_coords(lat, lon, r_mi=2):
     return c_lats, c_lons
 
 # --- CACHED FUNCTION ---
-# Pass basic DataFrames to avoid "UnhashableParamError"
 @st.cache_data
 def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     """
-    Multi-Jurisdictional Scanner:
-    1. Reads all shapefiles in the library.
-    2. Performs a spatial join to find ANY polygon that contains data points.
-    3. Merges them into one master map.
+    Scans library and returns polygons that intersect with data points.
     """
-    # 1. Create a temporary Points GeoDataFrame
+    # 1. Prepare Points (Calls + Stations)
     points_list = []
     if calls_df is not None:
         points_list.append(calls_df[['lat', 'lon']])
@@ -69,6 +65,8 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     if not points_list: return None, "No data points found."
     
     all_points = pd.concat(points_list)
+    
+    # Create GeoDataFrame locally
     points_gdf = gpd.GeoDataFrame(
         all_points, 
         geometry=gpd.points_from_xy(all_points.lon, all_points.lat), 
@@ -82,26 +80,24 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     matched_gdfs = []
     detected_sources = []
     
-    # Calculate bounds of all data points
     total_bounds = points_gdf.total_bounds 
     
     for shp_path in shp_files:
         try:
-            # Fast Filter: Load only parts of the map that overlap our data bounds
+            # Fast Filter
             gdf_chunk = gpd.read_file(shp_path, bbox=tuple(total_bounds))
             
             if not gdf_chunk.empty:
                 if gdf_chunk.crs is None: gdf_chunk.set_crs(epsg=4269, inplace=True)
                 gdf_chunk = gdf_chunk.to_crs(epsg=4326)
                 
-                # Strict Filter: Keep ONLY polygons that contain at least 1 point
+                # Strict Intersection Filter
                 matches = gpd.sjoin(gdf_chunk, points_gdf, how="inner", predicate="intersects")
                 
                 if not matches.empty:
                     valid_indices = matches.index.unique()
                     final_polys = gdf_chunk.loc[valid_indices].copy()
                     
-                    # Normalize Name Column
                     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in final_polys.columns), final_polys.columns[0])
                     final_polys['DISPLAY_NAME'] = final_polys[name_col].astype(str)
                     
@@ -113,7 +109,6 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     if not matched_gdfs:
         return None, "No matching geometry found."
         
-    # Combine all matches into one DataFrame
     master_gdf = pd.concat(matched_gdfs, ignore_index=True)
     return master_gdf, detected_sources
 
@@ -136,7 +131,7 @@ if call_data and station_data:
     df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
 
     # --- SCANNING ---
-    with st.spinner("🌍 Identifying multi-jurisdictional areas..."):
+    with st.spinner("🌍 Identifying active jurisdictions..."):
         master_gdf, match_sources = consolidate_jurisdictions(df_calls, df_stations_all, SHAPEFILE_DIR)
 
     if master_gdf is None:
@@ -161,26 +156,44 @@ if call_data and station_data:
         active_gdf = master_gdf[master_gdf['DISPLAY_NAME'] == target_selection]
 
     # --- GEOMETRY PROCESSING ---
-    # Combine polygons into one boundary
     try:
-        city_boundary_geom = active_gdf.geometry.union_all()
+        full_boundary = active_gdf.geometry.union_all()
     except AttributeError:
-        city_boundary_geom = unary_union(active_gdf.geometry)
+        full_boundary = unary_union(active_gdf.geometry)
         
-    # Auto-Calc UTM Zone
-    centroid = city_boundary_geom.centroid
+    # --- SMART CROP: Calculate Data Bounds ---
+    # Create a bounding box around the DATA (Calls + Stations), not the shapefile
+    data_points = pd.concat([df_calls[['lat', 'lon']], df_stations_all[['lat', 'lon']]])
+    min_lon, min_lat = data_points['lon'].min(), data_points['lat'].min()
+    max_lon, max_lat = data_points['lon'].max(), data_points['lat'].max()
+    
+    # Add a 10% buffer so points aren't on the edge of the screen
+    lat_buff = (max_lat - min_lat) * 0.1
+    lon_buff = (max_lon - min_lon) * 0.1
+    # Ensure buffer isn't zero (for single points)
+    lat_buff = max(lat_buff, 0.02)
+    lon_buff = max(lon_buff, 0.02)
+
+    focus_box = box(min_lon - lon_buff, min_lat - lat_buff, max_lon + lon_buff, max_lat + lat_buff)
+
+    # VISUAL CROP: Intersect the massive shapefile with our Focus Box
+    # This prevents lines from drawing far off-screen
+    display_boundary = full_boundary.intersection(focus_box)
+
+    # UTM Calculation (Standard)
+    centroid = full_boundary.centroid
     utm_zone = int((centroid.x + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if centroid.y > 0 else f"327{utm_zone}"
     
-    # Project to Meters
+    # Project for Analysis (Using full boundary for accurate area calcs)
     if hasattr(active_gdf.geometry, 'union_all'):
         city_m = active_gdf.to_crs(epsg=epsg_code).geometry.union_all()
     else:
         city_m = unary_union(active_gdf.to_crs(epsg=epsg_code).geometry)
     
-    # Clip Calls
+    # Clip Calls to Full Boundary (Data Logic)
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
-    calls_in_city = gdf_calls[gdf_calls.within(city_boundary_geom)].to_crs(epsg=epsg_code)
+    calls_in_city = gdf_calls[gdf_calls.within(full_boundary)].to_crs(epsg=epsg_code)
     calls_in_city['point_idx'] = range(len(calls_in_city))
     
     # 3. PRE-CALC STATIONS
@@ -292,15 +305,16 @@ if call_data and station_data:
 
     fig = go.Figure()
     
-    # Auto-Zoom
-    def calculate_zoom(bounds):
-        minx, miny, maxx, maxy = bounds
-        width = maxx - minx
+    # Auto-Zoom Calculation
+    def calculate_zoom(min_lon, max_lon):
+        width = max_lon - min_lon
         if width <= 0: return 12
-        zoom = 10 - np.log(width)
-        return min(max(zoom, 10), 14) 
+        zoom = 10.5 - np.log(width) # Adjusted formula for better fit
+        return min(max(zoom, 10), 15) 
 
+    # Draw Display Boundary (Cropped)
     def add_boundary_to_map(geom):
+        if geom.is_empty: return
         if isinstance(geom, Polygon):
             bx, by = geom.exterior.coords.xy
             fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
@@ -309,7 +323,7 @@ if call_data and station_data:
                 bx, by = poly.exterior.coords.xy
                 fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
 
-    add_boundary_to_map(city_boundary_geom)
+    add_boundary_to_map(display_boundary)
     
     if len(calls_in_city) > 0:
         sample_size = min(5000, len(calls_in_city))
@@ -332,12 +346,12 @@ if call_data and station_data:
                 hoverinfo='name'
             ))
 
-    bounds = city_boundary_geom.bounds
-    map_center_lat = city_boundary_geom.centroid.y
-    map_center_lon = city_boundary_geom.centroid.x
-    dynamic_zoom = calculate_zoom(bounds)
+    # Center map on the DATA CENTROID, not the shapefile centroid
+    data_center_lat = (min_lat + max_lat) / 2
+    data_center_lon = (min_lon + max_lon) / 2
+    dynamic_zoom = calculate_zoom(min_lon - lon_buff, max_lon + lon_buff)
 
-    fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": map_center_lat, "lon": map_center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
+    fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": data_center_lat, "lon": data_center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
     st.plotly_chart(fig, width='stretch')
 
 else:
