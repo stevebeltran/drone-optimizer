@@ -49,6 +49,8 @@ def get_circle_coords(lat, lon, r_mi=2):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
+# --- CACHED FUNCTION (FIXED) ---
+# We pass DataFrames (calls_df, stations_df) instead of Geometry objects to avoid Hashing Errors.
 @st.cache_data
 def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     """
@@ -67,6 +69,8 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     if not points_list: return None, "No data points found."
     
     all_points = pd.concat(points_list)
+    
+    # Create GeoDataFrame locally inside the function
     points_gdf = gpd.GeoDataFrame(
         all_points, 
         geometry=gpd.points_from_xy(all_points.lon, all_points.lat), 
@@ -86,7 +90,6 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     for shp_path in shp_files:
         try:
             # A. Fast Bbox Filter (Check file overlap)
-            # We assume CRS 4269 (NAD83) or 4326 (WGS84) usually.
             # We read with bbox to strictly limit what we load from disk.
             gdf_chunk = gpd.read_file(shp_path, bbox=tuple(total_bounds))
             
@@ -140,6 +143,7 @@ if call_data and station_data:
 
     # --- SCANNING ---
     with st.spinner("🌍 Identifying active jurisdictions..."):
+        # We pass DataFrames, NOT points, to avoid hashing errors
         master_gdf, match_sources = consolidate_jurisdictions(df_calls, df_stations_all, SHAPEFILE_DIR)
 
     if master_gdf is None:
@@ -167,7 +171,6 @@ if call_data and station_data:
         active_gdf = master_gdf[master_gdf['DISPLAY_NAME'] == target_selection]
 
     # Process Boundary
-    # Use union_all() for modern Geopandas compatibility
     try:
         city_boundary_geom = active_gdf.geometry.union_all()
     except AttributeError:
@@ -305,11 +308,10 @@ if call_data and station_data:
     # Helper to calculate dynamic zoom
     def calculate_zoom(bounds):
         minx, miny, maxx, maxy = bounds
-        # Simple heuristic for zoom level based on degree width
         width = maxx - minx
         if width <= 0: return 12
         zoom = 10 - np.log(width)
-        return min(max(zoom, 10), 14) # Clamp between 10 and 14
+        return min(max(zoom, 10), 14) 
 
     def add_boundary_to_map(geom):
         if isinstance(geom, Polygon):
