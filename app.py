@@ -167,6 +167,7 @@ if call_data and station_data:
         active_gdf = master_gdf[master_gdf['DISPLAY_NAME'] == target_selection]
 
     # Process Boundary
+    # Use union_all() for modern Geopandas compatibility
     try:
         city_boundary_geom = active_gdf.geometry.union_all()
     except AttributeError:
@@ -177,7 +178,8 @@ if call_data and station_data:
     utm_zone = int((centroid.x + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if centroid.y > 0 else f"327{utm_zone}"
     
-    city_m = active_gdf.to_crs(epsg=epsg_code).unary_union
+    # Project city geometry to UTM
+    city_m = active_gdf.to_crs(epsg=epsg_code).geometry.union_all() if hasattr(active_gdf.geometry, 'union_all') else unary_union(active_gdf.to_crs(epsg=epsg_code).geometry)
     
     # Prepare Calls
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
