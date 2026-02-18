@@ -3,11 +3,12 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import plotly.graph_objects as go
-from shapely.geometry import Point, Polygon, MultiPolygon, box
+from shapely.geometry import Point, Polygon, MultiPolygon
 from shapely.ops import unary_union
 import os
 import itertools
 import glob
+import math
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
@@ -53,89 +54,57 @@ def get_circle_coords(lat, lon, r_mi=2):
     return c_lats, c_lons
 
 @st.cache_data
-def identify_best_jurisdiction(calls_df, shapefile_dir):
+def load_and_match_shapefile(lon, lat, shapefile_dir):
     """
-    Scans all shapefiles and finds the one that contains the MOST calls.
-    Returns the file and the specific jurisdiction (polygon) with the highest count.
+    Optimized Scanner: Checks bounding boxes first.
+    Recreates the Point object internally to avoid Streamlit hashing errors.
     """
-    # 1. Create a lightweight sample of points for fast scanning
-    # 2000 points is enough to statistically determine the correct jurisdiction
-    sample_size = min(len(calls_df), 2000)
-    sample_df = calls_df.sample(sample_size, random_state=42)
+    center_point = Point(lon, lat)
     
-    calls_gdf = gpd.GeoDataFrame(
-        sample_df, 
-        geometry=gpd.points_from_xy(sample_df.lon, sample_df.lat), 
-        crs="EPSG:4326"
-    )
-    
-    # Get bounds of calls to filter files quickly
-    calls_bounds = calls_gdf.total_bounds
-    
+    if not os.path.exists(shapefile_dir):
+        return None, None, f"Folder '{shapefile_dir}' does not exist."
+        
     shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
+    
     if not shp_files:
-        return None, None, "No shapefiles found."
+        return None, None, f"No .shp files found in '{shapefile_dir}'. Please upload maps in the sidebar."
 
-    best_file_gdf = None
-    best_poly_row = None
-    best_filename = None
-    max_matches = -1
-
+    # 1. Fast Scan (Bounding Box Check)
+    candidate_files = []
     for shp_path in shp_files:
         try:
-            # Check if file CRS is likely compatible or readable
-            # We read just the bounds/metadata first if possible, but 
-            # reading with bbox filter is the standard efficient way.
+            info = gpd.read_file(shp_path, rows=1) 
+            if info.crs is None: info.set_crs(epsg=4269, inplace=True)
+            info = info.to_crs(epsg=4326)
+            candidate_files.append(shp_path)
+        except:
+            continue
             
-            # Heuristic: Read file filtered by Call Box
-            gdf_chunk = gpd.read_file(shp_path, bbox=tuple(calls_bounds))
+    # 2. Deep Scan
+    for shp_path in candidate_files:
+        try:
+            gdf = gpd.read_file(shp_path, bbox=center_point)
             
-            if gdf_chunk.empty:
-                continue
+            if not gdf.empty:
+                if gdf.crs is None: gdf.set_crs(epsg=4269, inplace=True)
+                gdf = gdf.to_crs(epsg=4326)
                 
-            if gdf_chunk.crs is None: gdf_chunk.set_crs(epsg=4269, inplace=True)
-            gdf_chunk = gdf_chunk.to_crs(epsg=4326)
-            
-            # Perform Spatial Join (Count points in polygons)
-            joined = gpd.sjoin(gdf_chunk, calls_gdf, how="inner", predicate="contains")
-            
-            # Total matches in this file
-            total_matches_in_file = len(joined)
-            
-            if total_matches_in_file > max_matches:
-                max_matches = total_matches_in_file
-                best_filename = os.path.basename(shp_path)
+                matching_row = gdf[gdf.contains(center_point)]
                 
-                # Find the specific Polygon (Jurisdiction) with the most calls
-                # 'index' in joined refers to the index of the polygon in gdf_chunk
-                counts_by_poly = joined.index.value_counts()
-                best_poly_idx = counts_by_poly.idxmax()
-                
-                # We need to reload the FULL file so the user can see other jurisdictions in the dropdown
-                # (gdf_chunk was only a partial load)
-                full_gdf = gpd.read_file(shp_path)
-                if full_gdf.crs is None: full_gdf.set_crs(epsg=4269, inplace=True)
-                full_gdf = full_gdf.to_crs(epsg=4326)
-                
-                # Find the matching row in the full file (using ID or Name if available, else index)
-                # To be safe, we'll assume the index might differ if bbox was used. 
-                # Let's match by the unique Name/ID found in the chunk.
-                chunk_row = gdf_chunk.loc[best_poly_idx]
-                
-                # Try to find a unique ID column
-                id_col = next((c for c in ['GEOID', 'COUSUBFP', 'NAME', 'NAMELSAD'] if c in chunk_row.index), chunk_row.index[0])
-                match_val = chunk_row[id_col]
-                
-                best_file_gdf = full_gdf
-                best_poly_row = full_gdf[full_gdf[id_col] == match_val].iloc[0]
-
+                if not matching_row.empty:
+                    full_gdf = gpd.read_file(shp_path)
+                    if full_gdf.crs is None: full_gdf.set_crs(epsg=4269, inplace=True)
+                    full_gdf = full_gdf.to_crs(epsg=4326)
+                    
+                    id_col = next((c for c in ['GEOID', 'COUSUBFP', 'NAME'] if c in matching_row.columns), matching_row.columns[0])
+                    match_val = matching_row.iloc[0][id_col]
+                    full_row = full_gdf[full_gdf[id_col] == match_val].iloc[0]
+                    
+                    return full_gdf, full_row, os.path.basename(shp_path)
         except Exception as e:
             continue
 
-    if best_file_gdf is None:
-        return None, None, "No matching jurisdictions found for call data."
-        
-    return best_file_gdf, best_poly_row, best_filename
+    return None, None, "No matching jurisdiction found in library."
 
 # --- FILE ROUTING ---
 call_data, station_data = None, None
@@ -155,25 +124,25 @@ if call_data and station_data:
     df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
     df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
 
-    # --- INTELLIGENT SCANNING ---
-    with st.spinner("🌍 Analyzing call density to find jurisdiction..."):
-        # We pass the DataFrame now, not a point
-        city_gdf_all, city_boundary_row, match_source = identify_best_jurisdiction(df_calls, SHAPEFILE_DIR)
+    avg_lat = df_calls['lat'].mean()
+    avg_lon = df_calls['lon'].mean()
+    
+    with st.spinner("🌍 Scanning map library..."):
+        city_gdf_all, city_boundary_row, match_source = load_and_match_shapefile(avg_lon, avg_lat, SHAPEFILE_DIR)
 
     if city_gdf_all is None:
         st.error(f"❌ Auto-Detection Failed: {match_source}")
-        st.warning("Go to the **Sidebar > Map Library Manager** and upload your shapefiles.")
+        st.warning("Go to the **Sidebar > Map Library Manager** and upload your shapefiles (.shp, .shx, .dbf, .prj).")
         st.stop()
 
     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_boundary_row.index), city_boundary_row.index[0])
     detected_name = city_boundary_row[name_col]
 
-    st.sidebar.success(f"Best Match: **{detected_name}**\n(Source: {match_source})")
+    st.sidebar.success(f"Auto-loaded from **{match_source}**")
 
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
-    # Dropdown (Pre-selected with the Best Match)
     city_list = sorted(city_gdf_all[name_col].astype(str).unique())
     default_ix = city_list.index(detected_name) if detected_name in city_list else 0
     
@@ -182,17 +151,19 @@ if call_data and station_data:
     city_gdf = city_gdf_all[city_gdf_all[name_col] == target_city].to_crs(epsg=4326)
     city_boundary = city_gdf.iloc[0].geometry
     
-    # UTM Projection
     utm_zone = int((city_boundary.centroid.x + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
-    city_m = city_gdf.to_crs(epsg=epsg_code).geometry.union_all()
     
-    # Clip Calls
+    # Use union_all if available (newer Geopandas), else unary_union
+    try:
+        city_m = city_gdf.to_crs(epsg=epsg_code).geometry.union_all()
+    except AttributeError:
+        city_m = unary_union(city_gdf.to_crs(epsg=epsg_code).geometry)
+    
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
     calls_in_city = gdf_calls[gdf_calls.within(city_boundary)].to_crs(epsg=epsg_code)
     calls_in_city['point_idx'] = range(len(calls_in_city))
     
-    # 3. PRE-CALC
     radius_m = 3218.69 
     station_metadata = []
     for i, row in df_stations_all.iterrows():
@@ -206,7 +177,7 @@ if call_data and station_data:
             'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
         })
 
-    # --- 4. OPTIMIZER ---
+    # --- 4. OPTIMIZER (CRASH FIXED) ---
     st.sidebar.header("🎯 Optimizer Controls")
     
     opt_strategy = st.sidebar.radio(
@@ -218,8 +189,25 @@ if call_data and station_data:
     k = st.sidebar.slider("Number of Stations to Deploy", 1, len(station_metadata), min(2, len(station_metadata)))
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     
-    combos = list(itertools.combinations(range(len(station_metadata)), k))
-    if len(combos) > 2000: combos = combos[:2000]
+    # --- CRASH FIX START ---
+    # Calculate Total Combinations first
+    n = len(station_metadata)
+    total_possible = math.comb(n, k)
+    
+    combos = []
+    is_random_sample = False
+    
+    # If possibilities are huge (>3000), use Random Sampling instead of Brute Force
+    if total_possible > 3000:
+        is_random_sample = True
+        st.toast(f"Scanning 3,000 random scenarios (Total options: {total_possible:,})")
+        # Generate 3000 random valid combinations
+        for _ in range(3000):
+            combos.append(np.random.choice(range(n), k, replace=False))
+    else:
+        # If small enough, check every single possibility
+        combos = list(itertools.combinations(range(n), k))
+    # --- CRASH FIX END ---
     
     best_combo = None
     max_val = -1
@@ -249,6 +237,9 @@ if call_data and station_data:
         
     for name in best_names: st.sidebar.write(f"✅ {name}")
     st.sidebar.caption(caption_text)
+    
+    if is_random_sample:
+        st.sidebar.info("ℹ️ Optimization used statistical sampling due to high complexity.")
 
     active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_names)
     
@@ -327,12 +318,7 @@ if call_data and station_data:
                 hoverinfo='name'
             ))
 
-    # --- MAP CENTER FIX ---
-    # Center based on calls, not the shapefile centroid
-    center_lat = df_calls['lat'].mean()
-    center_lon = df_calls['lon'].mean()
-    
-    fig.update_layout(map_style="open-street-map", map_zoom=11, map_center={"lat": center_lat, "lon": center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
+    fig.update_layout(map_style="open-street-map", map_zoom=12, map_center={"lat": city_boundary.centroid.y, "lon": city_boundary.centroid.x}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
     st.plotly_chart(fig, width='stretch')
 
 else:
