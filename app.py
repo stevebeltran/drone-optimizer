@@ -194,43 +194,70 @@ if call_data and station_data:
     utm_zone = int((center_lon + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
 
-    # --- GEOMETRY PROCESSING (CRASH PROOF) ---
+    # --- GEOMETRY PROCESSING (CRASH PROOF & CORRECT CRS) ---
     city_m = None
     city_boundary_geom = None
     full_boundary = None
     
     if active_gdf is not None and not active_gdf.empty:
         try:
-            # 1. Safe Merge (Buffer 0 trick fixes topology errors)
-            # This prevents crashes when merging complex adjacent polygons
-            polys = active_gdf.geometry.buffer(0.0001).unary_union
-            if isinstance(polys, (Polygon, MultiPolygon)):
-                full_boundary = polys.buffer(-0.0001) # Shrink back
-            else:
-                full_boundary = unary_union(active_gdf.geometry) # Fallback
-
-            # 2. Focus Box Clip
-            lat_pad = max((max_lat - min_lat) * 0.1, 0.02)
-            lon_pad = max((max_lon - min_lon) * 0.1, 0.02)
-            focus_box = box(min_lon - lon_pad, min_lat - lat_pad, max_lon + lon_pad, max_lat + lat_pad)
-
-            city_boundary_geom = full_boundary.intersection(focus_box)
-            
-            # 3. Project for Analysis
+            # 1. Reproject to UTM FIRST (Fixes 'Geographic CRS' warning)
             active_utm = active_gdf.to_crs(epsg=epsg_code)
-            city_m = unary_union(active_utm.geometry)
+            
+            # 2. Safe Merge in Meters (Buffer 0 trick fixes topology)
+            # Use 'union_all' if available (GeoPandas 1.0+), else 'unary_union'
+            if hasattr(active_utm.geometry, 'union_all'):
+                polys = active_utm.geometry.buffer(0.1).union_all()
+            else:
+                polys = active_utm.geometry.buffer(0.1).unary_union
                 
+            # Remove buffer to restore original shape (mostly)
+            if isinstance(polys, (Polygon, MultiPolygon)):
+                full_boundary_utm = polys.buffer(-0.1)
+            else:
+                full_boundary_utm = polys
+
+            # 3. Create Focus Box (in UTM)
+            # Convert Lat/Lon bounds to UTM
+            bounds_df = pd.DataFrame({'lat': [min_lat, max_lat], 'lon': [min_lon, max_lon]})
+            bounds_gdf = gpd.GeoDataFrame(bounds_df, geometry=gpd.points_from_xy(bounds_df.lon, bounds_df.lat), crs="EPSG:4326")
+            bounds_utm = bounds_gdf.to_crs(epsg=epsg_code)
+            
+            ux_min, uy_min = bounds_utm.geometry.iloc[0].x, bounds_utm.geometry.iloc[0].y
+            ux_max, uy_max = bounds_utm.geometry.iloc[1].x, bounds_utm.geometry.iloc[1].y
+            
+            # Add 10% padding in meters
+            x_pad = max((ux_max - ux_min) * 0.1, 2000)
+            y_pad = max((uy_max - uy_min) * 0.1, 2000)
+            
+            focus_box_utm = box(ux_min - x_pad, uy_min - y_pad, ux_max + x_pad, uy_max + y_pad)
+
+            # 4. Clip & Save
+            city_m = full_boundary_utm # Save full area for calc
+            
+            # For display, we need to reproject back to Lat/Lon
+            # We clip first in UTM (safe), then project back
+            clipped_utm = full_boundary_utm.intersection(focus_box_utm)
+            
+            # Convert back to 4326 for Plotly
+            city_boundary_geom = gpd.GeoSeries([clipped_utm], crs=epsg_code).to_crs(epsg=4326).iloc[0]
+            
+            # Convert full boundary back for strict filtering (optional)
+            full_boundary = gpd.GeoSeries([full_boundary_utm], crs=epsg_code).to_crs(epsg=4326).iloc[0]
+
         except Exception as e:
             st.error(f"Geometry Merge Error: {e}")
 
     # --- FILTER CALLS ---
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
     
+    # Filter calls using the cleaned boundary
     if full_boundary and not full_boundary.is_empty:
         try:
+            # Check containment in Lat/Lon (fast enough for points)
             calls_in_city = gdf_calls[gdf_calls.within(full_boundary)].to_crs(epsg=epsg_code)
         except:
-            calls_in_city = gdf_calls.to_crs(epsg=epsg_code) # Fallback if within fails
+            calls_in_city = gdf_calls.to_crs(epsg=epsg_code)
     else:
         calls_in_city = gdf_calls.to_crs(epsg=epsg_code)
         
@@ -242,11 +269,15 @@ if call_data and station_data:
     
     if not calls_in_city.empty:
         for i, row in df_stations_all.iterrows():
+            # Create point in UTM
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
+            
             mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
             covered_indices = set(calls_in_city[mask]['point_idx'])
             
             full_buf = s_pt_m.buffer(radius_m)
+            
+            # Intersect with the UTM land boundary
             if city_m is not None and not city_m.is_empty:
                 try:
                     clipped_buf = full_buf.intersection(city_m)
