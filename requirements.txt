@@ -3,4 +3,5 @@ pandas
 geopandas
 plotly
 shapely
+simplekml
 numpy
