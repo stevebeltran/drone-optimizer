@@ -9,6 +9,7 @@ import os
 import itertools
 import glob
 import math
+import simplekml
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
@@ -50,6 +51,48 @@ def get_circle_coords(lat, lon, r_mi=2):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
+# --- KML EXPORT FUNCTION ---
+def generate_kml(active_gdf, active_stations_df, calls_gdf):
+    kml = simplekml.Kml()
+    
+    # 1. Add Boundaries
+    fol_bounds = kml.newfolder(name="Jurisdictions")
+    for _, row in active_gdf.iterrows():
+        # Handle Polygon vs MultiPolygon
+        geoms = [row.geometry] if isinstance(row.geometry, Polygon) else row.geometry.geoms
+        
+        for geom in geoms:
+            pol = fol_bounds.newpolygon(name=row.get('DISPLAY_NAME', 'Boundary'))
+            # Exterior coords: list of (lon, lat)
+            pol.outerboundaryis = list(geom.exterior.coords)
+            # Style: Red Line, Transparent Fill
+            pol.style.linestyle.color = simplekml.Color.red
+            pol.style.linestyle.width = 3
+            pol.style.polystyle.color = simplekml.Color.changealphaint(50, simplekml.Color.red) # Semi-transparent
+
+    # 2. Add Active Stations
+    fol_stations = kml.newfolder(name="Active Stations")
+    for _, row in active_stations_df.iterrows():
+        pnt = fol_stations.newpoint(name=row['name'])
+        pnt.coords = [(row['lon'], row['lat'])]
+        pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/pushpin/ylw-pushpin.png'
+
+    # 3. Add Sample of Calls (Max 2000 to prevent Google Earth Lag)
+    fol_calls = kml.newfolder(name="Incident Data (Sample)")
+    
+    # Ensure calls are in Lat/Lon
+    calls_export = calls_gdf.to_crs(epsg=4326)
+    if len(calls_export) > 2000:
+        calls_export = calls_export.sample(2000)
+        
+    for _, row in calls_export.iterrows():
+        pnt = fol_calls.newpoint()
+        pnt.coords = [(row.geometry.x, row.geometry.y)]
+        pnt.style.iconstyle.scale = 0.5 # Small dots
+        pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
+
+    return kml.kml()
+
 # --- INTELLIGENT SCANNER ---
 @st.cache_data
 def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
@@ -58,7 +101,6 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     2. Counts calls in every polygon.
     3. FILTERS out the 'noise' (tiny outlier polygons) based on density.
     """
-    # 1. Prepare Points
     points_list = []
     if calls_df is not None:
         points_list.append(calls_df[['lat', 'lon']])
@@ -67,12 +109,9 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     
     if not points_list: return None
     
-    # 2. Optimization: Use a statistical sample for the scan if data is huge
     full_points = pd.concat(points_list)
-    # Remove bad coords (0,0)
     full_points = full_points[(full_points.lat.abs() > 1) & (full_points.lon.abs() > 1)]
     
-    # If >50k points, sample for speed (statistically accurate for ranking)
     if len(full_points) > 50000:
         scan_points = full_points.sample(50000, random_state=42)
     else:
@@ -88,7 +127,6 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
     relevant_polys = []
     
-    # 3. Scan Files
     for shp_path in shp_files:
         try:
             gdf_chunk = gpd.read_file(shp_path, bbox=tuple(total_bounds))
@@ -96,7 +134,6 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
                 if gdf_chunk.crs is None: gdf_chunk.set_crs(epsg=4269, inplace=True)
                 gdf_chunk = gdf_chunk.to_crs(epsg=4326)
                 
-                # Spatial Join
                 hits = gpd.sjoin(gdf_chunk, points_gdf, how="inner", predicate="intersects")
                 
                 if not hits.empty:
@@ -114,31 +151,16 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     if not relevant_polys: return None
         
     master_gdf = pd.concat(relevant_polys, ignore_index=True)
-    
-    # --- 4. THE NOISE FILTER (The Fix for 91,000 vs 125) ---
-    # Sort Highest to Lowest
     master_gdf = master_gdf.sort_values(by='data_count', ascending=False)
     
     total_scanned_points = master_gdf['data_count'].sum()
     
     if total_scanned_points > 0:
-        # Calculate % contribution of each jurisdiction
         master_gdf['pct_share'] = master_gdf['data_count'] / total_scanned_points
-        
-        # Calculate Cumulative Sum (Pareto Principle)
         master_gdf['cum_share'] = master_gdf['pct_share'].cumsum()
-        
-        # LOGIC: 
-        # Keep jurisdictions that make up the top 98% of data.
-        # OR keep any individual jurisdiction that has at least 1% of data.
-        # This effectively cuts off the long tail of tiny fragments.
         mask = (master_gdf['cum_share'] <= 0.98) | (master_gdf['pct_share'] > 0.01)
-        
-        # Always keep the #1 result even if logic gets weird
         mask.iloc[0] = True
-        
-        filtered_gdf = master_gdf[mask]
-        return filtered_gdf
+        return master_gdf[mask]
     
     return master_gdf
 
@@ -160,7 +182,6 @@ if call_data and station_data:
     df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
     df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
 
-    # --- SCANNING ---
     with st.spinner("🌍 Identifying dominant jurisdictions..."):
         master_gdf = find_relevant_jurisdictions(df_calls, df_stations_all, SHAPEFILE_DIR)
 
@@ -173,8 +194,6 @@ if call_data and station_data:
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
-    # --- MULTI-SELECT ---
-    # Label with percentages for clarity: "Chicago (98.5%)"
     total_pts = master_gdf['data_count'].sum()
     master_gdf['LABEL'] = master_gdf['DISPLAY_NAME'] + " (" + (master_gdf['data_count']/total_pts*100).round(1).astype(str) + "%)"
     
@@ -194,7 +213,6 @@ if call_data and station_data:
     selected_names = [options_map[l] for l in selected_labels]
     active_gdf = master_gdf[master_gdf['DISPLAY_NAME'].isin(selected_names)]
 
-    # --- GEOMETRY PROCESSING ---
     center_lon = df_calls['lon'].mean()
     center_lat = df_calls['lat'].mean()
     utm_zone = int((center_lon + 180) / 6) + 1
@@ -218,7 +236,6 @@ if call_data and station_data:
         st.error(f"Geometry Error: {e}")
         st.stop()
 
-    # --- FILTER CALLS ---
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
     gdf_calls_utm = gdf_calls.to_crs(epsg=epsg_code)
     
@@ -229,7 +246,6 @@ if call_data and station_data:
         
     calls_in_city['point_idx'] = range(len(calls_in_city))
     
-    # 3. PRE-CALC STATIONS
     radius_m = 3218.69 
     station_metadata = []
     
@@ -250,7 +266,7 @@ if call_data and station_data:
                 'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
             })
 
-    # --- 4. OPTIMIZER ---
+    # --- OPTIMIZER ---
     st.sidebar.header("🎯 Optimizer Controls")
     opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
@@ -260,7 +276,6 @@ if call_data and station_data:
     show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     
-    # --- SMART SAMPLING ---
     n = len(station_metadata)
     total_possible = math.comb(n, k)
     
@@ -338,10 +353,23 @@ if call_data and station_data:
     m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
     m4.metric("Redundancy (Overlap)", f"{overlap_perc:.1f}%")
 
-    # Map
+    # --- KML EXPORT BUTTON ---
+    kml_data = generate_kml(
+        active_gdf, 
+        df_stations_all[df_stations_all['name'].isin(active_names)], 
+        calls_in_city
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.download_button(
+        label="🌏 Download for Google Earth",
+        data=kml_data,
+        file_name="drone_deployment.kml",
+        mime="application/vnd.google-earth.kml+xml"
+    )
+
     fig = go.Figure()
     
-    # Robust Auto-Zoom
     def calculate_zoom(min_lon, max_lon):
         width = max_lon - min_lon
         if width <= 0: return 12
@@ -378,12 +406,10 @@ if call_data and station_data:
 
     data_points = calls_in_city.to_crs(epsg=4326)
     if not data_points.empty:
-        # Filter Zoom to Data
         q_low = data_points.geometry.x.quantile(0.01)
         q_high = data_points.geometry.x.quantile(0.99)
         clean_pts = data_points[(data_points.geometry.x >= q_low) & (data_points.geometry.x <= q_high)]
         if clean_pts.empty: clean_pts = data_points
-        
         min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
         max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
         dynamic_zoom = calculate_zoom(min_lon, max_lon)
