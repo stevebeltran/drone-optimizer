@@ -46,41 +46,58 @@ STATION_COLORS = [
 ]
 
 def get_circle_coords(lat, lon, r_mi=2):
+    """Generates Lat/Lon coordinates for a circle."""
     angles = np.linspace(0, 2*np.pi, 100)
     c_lats = lat + (r_mi/69.172) * np.sin(angles)
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
-# --- KML EXPORT FUNCTION ---
+# --- KML EXPORT FUNCTION (FIXED: ADDS RINGS) ---
 def generate_kml(active_gdf, active_stations_df, calls_gdf):
     kml = simplekml.Kml()
     
     # 1. Add Boundaries
     fol_bounds = kml.newfolder(name="Jurisdictions")
     for _, row in active_gdf.iterrows():
-        # Handle Polygon vs MultiPolygon
         geoms = [row.geometry] if isinstance(row.geometry, Polygon) else row.geometry.geoms
-        
         for geom in geoms:
             pol = fol_bounds.newpolygon(name=row.get('DISPLAY_NAME', 'Boundary'))
-            # Exterior coords: list of (lon, lat)
             pol.outerboundaryis = list(geom.exterior.coords)
-            # Style: Red Line, Transparent Fill
             pol.style.linestyle.color = simplekml.Color.red
             pol.style.linestyle.width = 3
-            pol.style.polystyle.color = simplekml.Color.changealphaint(50, simplekml.Color.red) # Semi-transparent
+            pol.style.polystyle.color = simplekml.Color.changealphaint(30, simplekml.Color.red)
 
-    # 2. Add Active Stations
-    fol_stations = kml.newfolder(name="Active Stations")
+    # 2. Add Active Stations & RINGS
+    fol_stations = kml.newfolder(name="Stations Points")
+    fol_rings = kml.newfolder(name="Coverage Rings") # New Layer for Rings
+
     for _, row in active_stations_df.iterrows():
+        # A. Add the Point (Pushpin)
         pnt = fol_stations.newpoint(name=row['name'])
         pnt.coords = [(row['lon'], row['lat'])]
-        pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/pushpin/ylw-pushpin.png'
+        # Use a standard Google Earth paddle icon
+        pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/paddle/blu-blank.png'
 
-    # 3. Add Sample of Calls (Max 2000 to prevent Google Earth Lag)
+        # B. Add the Ring (Polygon)
+        # Calculate circle coords (using 2 miles, same as optimizer)
+        lats, lons = get_circle_coords(row['lat'], row['lon'], r_mi=2)
+        
+        # Zip lons/lats into (lon, lat) tuples for KML
+        ring_coords = list(zip(lons, lats))
+        # Close the polygon loop
+        ring_coords.append(ring_coords[0])
+        
+        # Create the polygon in KML
+        pol = fol_rings.newpolygon(name=f"Range: {row['name']}")
+        pol.outerboundaryis = ring_coords
+        
+        # Style: Blue Outline, Semi-Transparent Blue Fill
+        pol.style.linestyle.color = simplekml.Color.blue
+        pol.style.linestyle.width = 2
+        pol.style.polystyle.color = simplekml.Color.changealphaint(60, simplekml.Color.blue)
+
+    # 3. Add Sample of Calls
     fol_calls = kml.newfolder(name="Incident Data (Sample)")
-    
-    # Ensure calls are in Lat/Lon
     calls_export = calls_gdf.to_crs(epsg=4326)
     if len(calls_export) > 2000:
         calls_export = calls_export.sample(2000)
@@ -88,7 +105,7 @@ def generate_kml(active_gdf, active_stations_df, calls_gdf):
     for _, row in calls_export.iterrows():
         pnt = fol_calls.newpoint()
         pnt.coords = [(row.geometry.x, row.geometry.y)]
-        pnt.style.iconstyle.scale = 0.5 # Small dots
+        pnt.style.iconstyle.scale = 0.5
         pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
 
     return kml.kml()
@@ -96,11 +113,6 @@ def generate_kml(active_gdf, active_stations_df, calls_gdf):
 # --- INTELLIGENT SCANNER ---
 @st.cache_data
 def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
-    """
-    1. Scans ALL shapefiles.
-    2. Counts calls in every polygon.
-    3. FILTERS out the 'noise' (tiny outlier polygons) based on density.
-    """
     points_list = []
     if calls_df is not None:
         points_list.append(calls_df[['lat', 'lon']])
@@ -266,7 +278,6 @@ if call_data and station_data:
                 'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
             })
 
-    # --- OPTIMIZER ---
     st.sidebar.header("🎯 Optimizer Controls")
     opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
@@ -353,7 +364,7 @@ if call_data and station_data:
     m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
     m4.metric("Redundancy (Overlap)", f"{overlap_perc:.1f}%")
 
-    # --- KML EXPORT BUTTON ---
+    # --- KML EXPORT ---
     kml_data = generate_kml(
         active_gdf, 
         df_stations_all[df_stations_all['name'].isin(active_names)], 
