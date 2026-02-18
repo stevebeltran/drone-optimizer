@@ -50,14 +50,15 @@ def get_circle_coords(lat, lon, r_mi=2):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
-# --- STRICT SCANNER LOGIC ---
+# --- INTELLIGENT SCANNER ---
 @st.cache_data
 def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     """
-    Scans shapefiles and returns ONLY the specific polygons that contain data.
-    Discards all empty polygons to prevent 'too much land' issues.
+    1. Scans ALL shapefiles.
+    2. Counts calls in every polygon.
+    3. FILTERS out the 'noise' (tiny outlier polygons) based on density.
     """
-    # 1. Prepare Points DataFrame (Calls + Stations)
+    # 1. Prepare Points
     points_list = []
     if calls_df is not None:
         points_list.append(calls_df[['lat', 'lon']])
@@ -66,16 +67,14 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     
     if not points_list: return None
     
-    # 2. Create Geometry for fast lookup
-    # We use a sample of calls if dataset is huge (>50k) to speed up the scan
-    # But we include ALL stations because they are critical
+    # 2. Optimization: Use a statistical sample for the scan if data is huge
     full_points = pd.concat(points_list)
-    
-    # Filter outliers (0,0) coordinates
+    # Remove bad coords (0,0)
     full_points = full_points[(full_points.lat.abs() > 1) & (full_points.lon.abs() > 1)]
     
-    if len(full_points) > 20000:
-        scan_points = full_points.sample(20000, random_state=42)
+    # If >50k points, sample for speed (statistically accurate for ranking)
+    if len(full_points) > 50000:
+        scan_points = full_points.sample(50000, random_state=42)
     else:
         scan_points = full_points
 
@@ -85,52 +84,61 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
         crs="EPSG:4326"
     )
     
-    # Calculate bounds to skip irrelevant files
     total_bounds = points_gdf.total_bounds
-    
     shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
     relevant_polys = []
     
+    # 3. Scan Files
     for shp_path in shp_files:
         try:
-            # A. Fast Bbox Filter (File Level)
             gdf_chunk = gpd.read_file(shp_path, bbox=tuple(total_bounds))
-            
             if not gdf_chunk.empty:
-                if gdf_chunk.crs is None: 
-                    # Heuristic for common US projections
-                    gdf_chunk.set_crs(epsg=4269, inplace=True)
-                
+                if gdf_chunk.crs is None: gdf_chunk.set_crs(epsg=4269, inplace=True)
                 gdf_chunk = gdf_chunk.to_crs(epsg=4326)
                 
-                # B. Strict Polygon Filter (Row Level)
-                # sjoin determines which specific polygon contains points
+                # Spatial Join
                 hits = gpd.sjoin(gdf_chunk, points_gdf, how="inner", predicate="intersects")
                 
                 if not hits.empty:
-                    # Get unique polygons that actually have data
                     valid_indices = hits.index.unique()
                     subset = gdf_chunk.loc[valid_indices].copy()
-                    
-                    # Calculate "Call Density" for ranking
-                    # (Count how many times each polygon index appears in 'hits')
                     subset['data_count'] = hits.index.value_counts()
                     
-                    # Normalize Name for Display
                     name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in subset.columns), subset.columns[0])
                     subset['DISPLAY_NAME'] = subset[name_col].astype(str)
-                    subset['SOURCE_FILE'] = os.path.basename(shp_path)
                     
                     relevant_polys.append(subset)
         except Exception:
             continue
             
-    if not relevant_polys:
-        return None
+    if not relevant_polys: return None
         
-    # Combine and Sort by Data Density (Highest count first)
     master_gdf = pd.concat(relevant_polys, ignore_index=True)
+    
+    # --- 4. THE NOISE FILTER (The Fix for 91,000 vs 125) ---
+    # Sort Highest to Lowest
     master_gdf = master_gdf.sort_values(by='data_count', ascending=False)
+    
+    total_scanned_points = master_gdf['data_count'].sum()
+    
+    if total_scanned_points > 0:
+        # Calculate % contribution of each jurisdiction
+        master_gdf['pct_share'] = master_gdf['data_count'] / total_scanned_points
+        
+        # Calculate Cumulative Sum (Pareto Principle)
+        master_gdf['cum_share'] = master_gdf['pct_share'].cumsum()
+        
+        # LOGIC: 
+        # Keep jurisdictions that make up the top 98% of data.
+        # OR keep any individual jurisdiction that has at least 1% of data.
+        # This effectively cuts off the long tail of tiny fragments.
+        mask = (master_gdf['cum_share'] <= 0.98) | (master_gdf['pct_share'] > 0.01)
+        
+        # Always keep the #1 result even if logic gets weird
+        mask.iloc[0] = True
+        
+        filtered_gdf = master_gdf[mask]
+        return filtered_gdf
     
     return master_gdf
 
@@ -153,43 +161,40 @@ if call_data and station_data:
     df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
 
     # --- SCANNING ---
-    with st.spinner("🌍 Identifying exact jurisdictions..."):
+    with st.spinner("🌍 Identifying dominant jurisdictions..."):
         master_gdf = find_relevant_jurisdictions(df_calls, df_stations_all, SHAPEFILE_DIR)
 
     if master_gdf is None or master_gdf.empty:
         st.error("❌ No matching jurisdictions found.")
-        st.info("Ensure your shapefiles overlap with your CSV coordinates.")
         st.stop()
 
-    st.sidebar.success(f"**Found {len(master_gdf)} Active Zones**")
+    st.sidebar.success(f"**Found {len(master_gdf)} Significant Zones**")
     
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
-    # --- MULTI-SELECT WIDGET (Ranked) ---
-    # Create labels that show the count, e.g. "Schaumburg (15,402 calls)"
-    master_gdf['LABEL'] = master_gdf['DISPLAY_NAME'] + " (" + master_gdf['data_count'].astype(str) + " pts)"
-    options_map = dict(zip(master_gdf['LABEL'], master_gdf['DISPLAY_NAME']))
+    # --- MULTI-SELECT ---
+    # Label with percentages for clarity: "Chicago (98.5%)"
+    total_pts = master_gdf['data_count'].sum()
+    master_gdf['LABEL'] = master_gdf['DISPLAY_NAME'] + " (" + (master_gdf['data_count']/total_pts*100).round(1).astype(str) + "%)"
     
-    # Default: Select top 5 most active areas automatically
-    default_selections = master_gdf['LABEL'].tolist()[:13] 
+    options_map = dict(zip(master_gdf['LABEL'], master_gdf['DISPLAY_NAME']))
+    all_options = master_gdf['LABEL'].tolist()
     
     selected_labels = ctrl_col1.multiselect(
-        "📍 Active Jurisdictions (Sorted by Activity)", 
-        options=master_gdf['LABEL'].tolist(), 
-        default=default_selections
+        "📍 Active Jurisdictions", 
+        options=all_options, 
+        default=all_options
     )
     
     if not selected_labels:
         st.warning("Please select at least one jurisdiction.")
         st.stop()
         
-    # Filter Active GDF based on selection
     selected_names = [options_map[l] for l in selected_labels]
     active_gdf = master_gdf[master_gdf['DISPLAY_NAME'].isin(selected_names)]
 
-    # --- GEOMETRY PROCESSING (ROBUST) ---
-    # 1. Determine UTM Zone from Data Center
+    # --- GEOMETRY PROCESSING ---
     center_lon = df_calls['lon'].mean()
     center_lat = df_calls['lat'].mean()
     utm_zone = int((center_lon + 180) / 6) + 1
@@ -199,36 +204,26 @@ if call_data and station_data:
     city_boundary_geom = None
     
     try:
-        # Reproject to UTM for safe merging
         active_utm = active_gdf.to_crs(epsg=epsg_code)
         
-        # Buffer(0) trick fixes topology errors (gaps/overlaps) that cause crashes
-        # Use union_all if available, else unary_union
         if hasattr(active_utm.geometry, 'union_all'):
-            # Buffer by 1 meter to close gaps, merge, then unbuffer
-            merged_poly = active_utm.geometry.buffer(1.0).union_all().buffer(-1.0)
+            full_boundary_utm = active_utm.geometry.buffer(0.1).union_all().buffer(-0.1)
         else:
-            merged_poly = active_utm.geometry.buffer(1.0).unary_union.buffer(-1.0)
+            full_boundary_utm = active_utm.geometry.buffer(0.1).unary_union.buffer(-0.1)
             
-        city_m = merged_poly
-        
-        # Convert back to Lat/Lon for display
-        city_boundary_geom = gpd.GeoSeries([merged_poly], crs=epsg_code).to_crs(epsg=4326).iloc[0]
+        city_m = full_boundary_utm
+        city_boundary_geom = gpd.GeoSeries([full_boundary_utm], crs=epsg_code).to_crs(epsg=4326).iloc[0]
         
     except Exception as e:
-        st.error(f"Geometry Merge Error: {e}")
+        st.error(f"Geometry Error: {e}")
         st.stop()
 
     # --- FILTER CALLS ---
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
     gdf_calls_utm = gdf_calls.to_crs(epsg=epsg_code)
     
-    # Filter calls to strictly inside the selected boundary
     try:
-        # Using within logic on UTM for accuracy
-        # (This handles the "multiple shape files" requirement)
-        mask = gdf_calls_utm.within(city_m)
-        calls_in_city = gdf_calls_utm[mask]
+        calls_in_city = gdf_calls_utm[gdf_calls_utm.within(city_m)]
     except:
         calls_in_city = gdf_calls_utm
         
@@ -241,10 +236,8 @@ if call_data and station_data:
     if not calls_in_city.empty:
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
-            
-            # Fast distance filter first
-            dist_mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
-            covered_indices = set(calls_in_city[dist_mask]['point_idx'])
+            mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
+            covered_indices = set(calls_in_city[mask]['point_idx'])
             
             full_buf = s_pt_m.buffer(radius_m)
             try:
@@ -257,7 +250,7 @@ if call_data and station_data:
                 'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
             })
 
-    # --- 4. OPTIMIZER (CRASH PROOF) ---
+    # --- 4. OPTIMIZER ---
     st.sidebar.header("🎯 Optimizer Controls")
     opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
@@ -267,18 +260,14 @@ if call_data and station_data:
     show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     
-    # --- SMART OPTIMIZER (SAMPLING) ---
+    # --- SMART SAMPLING ---
     n = len(station_metadata)
     total_possible = math.comb(n, k)
     
     combos = []
-    is_random_sample = False
-    
-    if total_possible > 5000:
-        is_random_sample = True
-        st.toast(f"Running Statistical Optimization (Total combinations: {total_possible:,})")
-        # Sample 5000 random scenarios
-        for _ in range(5000):
+    if total_possible > 3000:
+        st.toast(f"Optimization Mode: Sampling ({total_possible:,} options)")
+        for _ in range(3000):
             combos.append(np.random.choice(range(n), k, replace=False))
     else:
         combos = list(itertools.combinations(range(n), k))
@@ -303,12 +292,11 @@ if call_data and station_data:
             best_names = [station_metadata[i]['name'] for i in best_combo]
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🏆 Deployment Plan")
+    st.sidebar.subheader("🏆 Recommended Deployment")
     for name in best_names: st.sidebar.write(f"✅ {name}")
     
     active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_names)
     
-    # Stats Calculation
     area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
     if active_names and station_metadata:
         active_data = [s for s in station_metadata if s['name'] in active_names]
@@ -350,9 +338,10 @@ if call_data and station_data:
     m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
     m4.metric("Redundancy (Overlap)", f"{overlap_perc:.1f}%")
 
+    # Map
     fig = go.Figure()
     
-    # Auto-Zoom (Robust)
+    # Robust Auto-Zoom
     def calculate_zoom(min_lon, max_lon):
         width = max_lon - min_lon
         if width <= 0: return 12
@@ -373,7 +362,6 @@ if call_data and station_data:
         add_boundary_to_map(city_boundary_geom)
         
     if len(calls_in_city) > 0:
-        # Sample calls for performance
         display_calls = calls_in_city.sample(min(5000, len(calls_in_city))).to_crs(epsg=4326)
         fig.add_trace(go.Scattermap(lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
 
@@ -388,17 +376,19 @@ if call_data and station_data:
                 line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
                 name=f"{s['name']}", hoverinfo='name'))
 
-    # Center on filtered data
     data_points = calls_in_city.to_crs(epsg=4326)
     if not data_points.empty:
-        # Outlier rejection for zoom
-        clean_points = data_points # You can add quantile filtering here if needed
-        min_lon, min_lat = clean_points.geometry.x.min(), clean_points.geometry.y.min()
-        max_lon, max_lat = clean_points.geometry.x.max(), clean_points.geometry.y.max()
+        # Filter Zoom to Data
+        q_low = data_points.geometry.x.quantile(0.01)
+        q_high = data_points.geometry.x.quantile(0.99)
+        clean_pts = data_points[(data_points.geometry.x >= q_low) & (data_points.geometry.x <= q_high)]
+        if clean_pts.empty: clean_pts = data_points
+        
+        min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
+        max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
         dynamic_zoom = calculate_zoom(min_lon, max_lon)
         center_lat, center_lon = (min_lat + max_lat)/2, (min_lon + max_lon)/2
     else:
-        # Fallback
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
     fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": center_lat, "lon": center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
