@@ -3,7 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import plotly.graph_objects as go
-from shapely.geometry import Point, Polygon, MultiPolygon, box
+from shapely.geometry import Point, Polygon, MultiPolygon
 from shapely.ops import unary_union
 import os
 import itertools
@@ -15,16 +15,21 @@ st.title("🛰️ brinc COS Drone Optimizer")
 
 # --- CONFIGURATION ---
 SHAPEFILE_DIR = "jurisdiction_data" 
+
+# Ensure the directory exists
 if not os.path.exists(SHAPEFILE_DIR):
     os.makedirs(SHAPEFILE_DIR)
 
 # --- SIDEBAR: MAP LIBRARY MANAGER ---
 with st.sidebar.expander("🗺️ Map Library Manager"):
     st.write("Upload shapefiles here to populate the 'jurisdiction_data' folder.")
+    # Allow uploading map files to save them permanently (for this session)
     map_files = st.file_uploader("Drop .shp, .shx, .dbf, .prj files", accept_multiple_files=True)
+    
     if map_files:
         count = 0
         for f in map_files:
+            # Save the file to the jurisdiction_data folder
             with open(os.path.join(SHAPEFILE_DIR, f.name), "wb") as buffer:
                 buffer.write(f.getbuffer())
             count += 1
@@ -49,74 +54,62 @@ def get_circle_coords(lat, lon, r_mi=2):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
-# --- CACHED FUNCTION ---
 @st.cache_data
-def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
+def load_and_match_shapefile(lon, lat, shapefile_dir):
     """
-    Scans library and returns polygons that intersect with data points.
-    Passes DataFrames to avoid caching errors.
+    Optimized Scanner: Checks bounding boxes first.
+    Recreates the Point object internally to avoid Streamlit hashing errors.
     """
-    # 1. Prepare Points
-    points_list = []
-    if calls_df is not None:
-        points_list.append(calls_df[['lat', 'lon']])
-    if stations_df is not None:
-        points_list.append(stations_df[['lat', 'lon']])
+    center_point = Point(lon, lat)
+    
+    # Check if folder exists and has files
+    if not os.path.exists(shapefile_dir):
+        return None, None, f"Folder '{shapefile_dir}' does not exist."
         
-    if not points_list: return None, "No data points found."
-    
-    all_points = pd.concat(points_list)
-    
-    # FILTER: Remove (0,0) and Nulls before spatial join
-    all_points = all_points.dropna()
-    all_points = all_points[(all_points.lat.abs() > 0.1) & (all_points.lon.abs() > 0.1)]
-    
-    points_gdf = gpd.GeoDataFrame(
-        all_points, 
-        geometry=gpd.points_from_xy(all_points.lon, all_points.lat), 
-        crs="EPSG:4326"
-    )
-    
-    # 2. Scan Library
     shp_files = glob.glob(os.path.join(shapefile_dir, "*.shp"))
-    if not shp_files: return None, "No shapefiles found in library."
+    
+    if not shp_files:
+        return None, None, f"No .shp files found in '{shapefile_dir}'. Please upload maps in the sidebar."
 
-    matched_gdfs = []
-    detected_sources = []
-    
-    total_bounds = points_gdf.total_bounds 
-    
+    # 1. Fast Scan (Bounding Box Check)
+    candidate_files = []
     for shp_path in shp_files:
         try:
-            # Fast Filter
-            gdf_chunk = gpd.read_file(shp_path, bbox=tuple(total_bounds))
-            
-            if not gdf_chunk.empty:
-                if gdf_chunk.crs is None: 
-                    gdf_chunk.set_crs(epsg=4269, inplace=True)
-                
-                gdf_chunk = gdf_chunk.to_crs(epsg=4326)
-                
-                # Strict Intersection Filter
-                matches = gpd.sjoin(gdf_chunk, points_gdf, how="inner", predicate="intersects")
-                
-                if not matches.empty:
-                    valid_indices = matches.index.unique()
-                    final_polys = gdf_chunk.loc[valid_indices].copy()
-                    
-                    name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in final_polys.columns), final_polys.columns[0])
-                    final_polys['DISPLAY_NAME'] = final_polys[name_col].astype(str)
-                    
-                    matched_gdfs.append(final_polys)
-                    detected_sources.append(os.path.basename(shp_path))
-        except Exception:
+            # Read only the bounds/metadata first
+            info = gpd.read_file(shp_path, rows=1) 
+            if info.crs is None: info.set_crs(epsg=4269, inplace=True)
+            info = info.to_crs(epsg=4326)
+            candidate_files.append(shp_path)
+        except:
             continue
             
-    if not matched_gdfs:
-        return None, "No matching geometry found."
-        
-    master_gdf = pd.concat(matched_gdfs, ignore_index=True)
-    return master_gdf, detected_sources
+    # 2. Deep Scan (Detailed Polygon Check on Candidates)
+    for shp_path in candidate_files:
+        try:
+            # Load file using a "bbox" filter to only load relevant geometry
+            gdf = gpd.read_file(shp_path, bbox=center_point)
+            
+            if not gdf.empty:
+                if gdf.crs is None: gdf.set_crs(epsg=4269, inplace=True)
+                gdf = gdf.to_crs(epsg=4326)
+                
+                matching_row = gdf[gdf.contains(center_point)]
+                
+                if not matching_row.empty:
+                    # Reload full file for context
+                    full_gdf = gpd.read_file(shp_path)
+                    if full_gdf.crs is None: full_gdf.set_crs(epsg=4269, inplace=True)
+                    full_gdf = full_gdf.to_crs(epsg=4326)
+                    
+                    id_col = next((c for c in ['GEOID', 'COUSUBFP', 'NAME'] if c in matching_row.columns), matching_row.columns[0])
+                    match_val = matching_row.iloc[0][id_col]
+                    full_row = full_gdf[full_gdf[id_col] == match_val].iloc[0]
+                    
+                    return full_gdf, full_row, os.path.basename(shp_path)
+        except Exception as e:
+            continue
+
+    return None, None, "No matching jurisdiction found in library."
 
 # --- FILE ROUTING ---
 call_data, station_data = None, None
@@ -136,202 +129,95 @@ if call_data and station_data:
     df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
     df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
 
-    # --- SCANNING ---
-    with st.spinner("🌍 Identifying active jurisdictions..."):
-        master_gdf, match_sources = consolidate_jurisdictions(df_calls, df_stations_all, SHAPEFILE_DIR)
+    avg_lat = df_calls['lat'].mean()
+    avg_lon = df_calls['lon'].mean()
+    
+    with st.spinner("🌍 Scanning map library..."):
+        city_gdf_all, city_boundary_row, match_source = load_and_match_shapefile(avg_lon, avg_lat, SHAPEFILE_DIR)
 
-    if match_sources:
-        st.sidebar.success(f"**Loaded {len(match_sources)} Map Files**")
-    else:
-        st.sidebar.warning("No boundaries found. Using data-only view.")
+    if city_gdf_all is None:
+        st.error(f"❌ Auto-Detection Failed: {match_source}")
+        st.warning("Go to the **Sidebar > Map Library Manager** and upload your shapefiles (.shp, .shx, .dbf, .prj).")
+        st.stop()
+
+    name_col = next((c for c in ['NAME', 'DISTRICT', 'NAMELSAD'] if c in city_boundary_row.index), city_boundary_row.index[0])
+    detected_name = city_boundary_row[name_col]
+
+    # --- MOVED: Notification to Sidebar ---
+    st.sidebar.success(f"Auto-loaded from **{match_source}**")
 
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
-    # --- MULTI-SELECT WIDGET ---
-    active_gdf = None
-    if master_gdf is not None:
-        all_jurisdictions = sorted(master_gdf['DISPLAY_NAME'].unique())
-        
-        selected_jurisdictions = ctrl_col1.multiselect(
-            "📍 Select Jurisdictions (Filter)", 
-            options=all_jurisdictions, 
-            default=all_jurisdictions
-        )
-        
-        if selected_jurisdictions:
-            active_gdf = master_gdf[master_gdf['DISPLAY_NAME'].isin(selected_jurisdictions)]
-        else:
-            st.warning("Select at least one jurisdiction to see boundaries.")
-            active_gdf = None
+    city_list = sorted(city_gdf_all[name_col].astype(str).unique())
+    default_ix = city_list.index(detected_name) if detected_name in city_list else 0
     
-    # --- DATA CLEANING & BOUNDS CALCULATION ---
-    data_points = pd.concat([df_calls[['lat', 'lon']], df_stations_all[['lat', 'lon']]])
-    data_points = data_points.dropna()
-    data_points = data_points[(data_points.lat.abs() > 1) & (data_points.lon.abs() > 1)]
+    target_city = ctrl_col1.selectbox("📍 Jurisdiction", city_list, index=default_ix)
+    # Note: Removed the success message from here
 
-    # Statistical Filter (Typo Fix)
-    if not data_points.empty:
-        q_low = data_points.quantile(0.01)
-        q_high = data_points.quantile(0.99)
-        
-        clean_points = data_points[
-            (data_points.lat >= q_low.lat) & (data_points.lat <= q_high.lat) &
-            (data_points.lon >= q_low.lon) & (data_points.lon <= q_high.lon)
-        ]
-        
-        if clean_points.empty:
-            clean_points = data_points
-            
-        min_lon, min_lat = clean_points['lon'].min(), clean_points['lat'].min()
-        max_lon, max_lat = clean_points['lon'].max(), clean_points['lat'].max()
-    else:
-        min_lat, max_lat, min_lon, max_lon = 39.0, 40.0, -98.0, -97.0
-
-    # Auto-Calc UTM
-    center_lon = (min_lon + max_lon) / 2
-    center_lat = (min_lat + max_lat) / 2
-    utm_zone = int((center_lon + 180) / 6) + 1
-    epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
-
-    # --- GEOMETRY PROCESSING (CRASH PROOF & CORRECT CRS) ---
-    city_m = None
-    city_boundary_geom = None
-    full_boundary = None
+    city_gdf = city_gdf_all[city_gdf_all[name_col] == target_city].to_crs(epsg=4326)
+    city_boundary = city_gdf.iloc[0].geometry
     
-    if active_gdf is not None and not active_gdf.empty:
-        try:
-            # 1. Reproject to UTM FIRST (Fixes 'Geographic CRS' warning)
-            active_utm = active_gdf.to_crs(epsg=epsg_code)
-            
-            # 2. Safe Merge in Meters (Buffer 0 trick fixes topology)
-            # Use 'union_all' if available (GeoPandas 1.0+), else 'unary_union'
-            if hasattr(active_utm.geometry, 'union_all'):
-                polys = active_utm.geometry.buffer(0.1).union_all()
-            else:
-                polys = active_utm.geometry.buffer(0.1).unary_union
-                
-            # Remove buffer to restore original shape (mostly)
-            if isinstance(polys, (Polygon, MultiPolygon)):
-                full_boundary_utm = polys.buffer(-0.1)
-            else:
-                full_boundary_utm = polys
-
-            # 3. Create Focus Box (in UTM)
-            # Convert Lat/Lon bounds to UTM
-            bounds_df = pd.DataFrame({'lat': [min_lat, max_lat], 'lon': [min_lon, max_lon]})
-            bounds_gdf = gpd.GeoDataFrame(bounds_df, geometry=gpd.points_from_xy(bounds_df.lon, bounds_df.lat), crs="EPSG:4326")
-            bounds_utm = bounds_gdf.to_crs(epsg=epsg_code)
-            
-            ux_min, uy_min = bounds_utm.geometry.iloc[0].x, bounds_utm.geometry.iloc[0].y
-            ux_max, uy_max = bounds_utm.geometry.iloc[1].x, bounds_utm.geometry.iloc[1].y
-            
-            # Add 10% padding in meters
-            x_pad = max((ux_max - ux_min) * 0.1, 2000)
-            y_pad = max((uy_max - uy_min) * 0.1, 2000)
-            
-            focus_box_utm = box(ux_min - x_pad, uy_min - y_pad, ux_max + x_pad, uy_max + y_pad)
-
-            # 4. Clip & Save
-            city_m = full_boundary_utm # Save full area for calc
-            
-            # For display, we need to reproject back to Lat/Lon
-            # We clip first in UTM (safe), then project back
-            clipped_utm = full_boundary_utm.intersection(focus_box_utm)
-            
-            # Convert back to 4326 for Plotly
-            city_boundary_geom = gpd.GeoSeries([clipped_utm], crs=epsg_code).to_crs(epsg=4326).iloc[0]
-            
-            # Convert full boundary back for strict filtering (optional)
-            full_boundary = gpd.GeoSeries([full_boundary_utm], crs=epsg_code).to_crs(epsg=4326).iloc[0]
-
-        except Exception as e:
-            st.error(f"Geometry Merge Error: {e}")
-
-    # --- FILTER CALLS ---
+    utm_zone = int((city_boundary.centroid.x + 180) / 6) + 1
+    epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
+    city_m = city_gdf.to_crs(epsg=epsg_code).geometry.union_all()
+    
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
-    
-    # Filter calls using the cleaned boundary
-    if full_boundary and not full_boundary.is_empty:
-        try:
-            # Check containment in Lat/Lon (fast enough for points)
-            calls_in_city = gdf_calls[gdf_calls.within(full_boundary)].to_crs(epsg=epsg_code)
-        except:
-            calls_in_city = gdf_calls.to_crs(epsg=epsg_code)
-    else:
-        calls_in_city = gdf_calls.to_crs(epsg=epsg_code)
-        
+    calls_in_city = gdf_calls[gdf_calls.within(city_boundary)].to_crs(epsg=epsg_code)
     calls_in_city['point_idx'] = range(len(calls_in_city))
     
-    # 3. PRE-CALC STATIONS
     radius_m = 3218.69 
     station_metadata = []
-    
-    if not calls_in_city.empty:
-        for i, row in df_stations_all.iterrows():
-            # Create point in UTM
-            s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
-            
-            mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
-            covered_indices = set(calls_in_city[mask]['point_idx'])
-            
-            full_buf = s_pt_m.buffer(radius_m)
-            
-            # Intersect with the UTM land boundary
-            if city_m is not None and not city_m.is_empty:
-                try:
-                    clipped_buf = full_buf.intersection(city_m)
-                except:
-                    clipped_buf = full_buf
-            else:
-                clipped_buf = full_buf 
-                
-            station_metadata.append({
-                'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
-                'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
-            })
+    for i, row in df_stations_all.iterrows():
+        s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
+        mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
+        covered_indices = set(calls_in_city[mask]['point_idx'])
+        full_buf = s_pt_m.buffer(radius_m)
+        clipped_buf = full_buf.intersection(city_m)
+        station_metadata.append({
+            'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
+            'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
+        })
 
-    # --- 4. OPTIMIZER ---
     st.sidebar.header("🎯 Optimizer Controls")
-    opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
-    max_k = len(station_metadata) if station_metadata else 1
-    k = st.sidebar.slider("Number of Stations to Deploy", 1, max_k, min(2, max_k) if max_k > 1 else 1)
+    opt_strategy = st.sidebar.radio(
+        "Optimization Goal:",
+        ("Maximize Call Coverage", "Maximize Land Coverage"),
+        index=0
+    )
     
-    show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
+    k = st.sidebar.slider("Number of Stations to Deploy", 1, len(station_metadata), min(2, len(station_metadata)))
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     
-    best_names = []
+    combos = list(itertools.combinations(range(len(station_metadata)), k))
+    if len(combos) > 2000: combos = combos[:2000]
+    
+    best_combo = None
     max_val = -1
-    if len(station_metadata) > 0:
-        combos = list(itertools.combinations(range(len(station_metadata)), k))
-        if len(combos) > 2000: combos = combos[:2000]
-        
-        best_combo = None
-        with st.spinner(f"Optimizing for {opt_strategy}..."):
-            for combo in combos:
-                if opt_strategy == "Maximize Call Coverage":
-                    union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
-                    val = len(union_set)
-                else:
-                    union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
-                    val = union_geo.area
-                
-                if val > max_val:
-                    max_val = val
-                    best_combo = combo
+    
+    with st.spinner(f"Optimizing for {opt_strategy}..."):
+        for combo in combos:
+            if opt_strategy == "Maximize Call Coverage":
+                union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
+                val = len(union_set)
+            else:
+                union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
+                val = union_geo.area
             
-            if best_combo:
-                best_names = [station_metadata[i]['name'] for i in best_combo]
+            if val > max_val:
+                max_val = val
+                best_combo = combo
+        
+        best_names = [station_metadata[i]['name'] for i in best_combo]
 
     st.sidebar.markdown("---")
     if opt_strategy == "Maximize Call Coverage":
         st.sidebar.subheader("🏆 Optimal Stations (Calls)")
-        caption_text = f"Covers {max_val:,} filtered incident points"
+        caption_text = f"Covers {max_val:,} total incident points"
     else:
         st.sidebar.subheader("🌍 Optimal Stations (Land)")
-        total_area = city_m.area if city_m else 1
-        caption_text = f"Covers {(max_val/total_area)*100:.1f}% of selected area"
+        caption_text = f"Covers {(max_val/city_m.area)*100:.1f}% of total area"
         
     for name in best_names: st.sidebar.write(f"✅ {name}")
     st.sidebar.caption(caption_text)
@@ -339,14 +225,12 @@ if call_data and station_data:
     active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_names)
     
     area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
-    if active_names and station_metadata:
+    if active_names:
         active_data = [s for s in station_metadata if s['name'] in active_names]
         active_buffers = [s['clipped_m'] for s in active_data]
         active_indices = [s['indices'] for s in active_data]
         
-        if city_m is not None and not city_m.is_empty:
-            area_covered_perc = (unary_union(active_buffers).area / city_m.area) * 100
-        
+        area_covered_perc = (unary_union(active_buffers).area / city_m.area) * 100
         if len(calls_in_city) > 0:
             calls_covered_perc = (len(set().union(*active_indices)) / len(calls_in_city)) * 100
         
@@ -355,9 +239,7 @@ if call_data and station_data:
             for j in range(i+1, len(active_buffers)):
                 over = active_buffers[i].intersection(active_buffers[j])
                 if not over.is_empty: inters.append(over)
-        
-        if city_m is not None and not city_m.is_empty:
-            overlap_perc = (unary_union(inters).area / city_m.area * 100) if inters else 0.0
+        overlap_perc = (unary_union(inters).area / city_m.area * 100) if inters else 0.0
     
     st.markdown("---")
 
@@ -385,15 +267,7 @@ if call_data and station_data:
 
     fig = go.Figure()
     
-    # Auto-Zoom
-    def calculate_zoom(min_lon, max_lon):
-        width = max_lon - min_lon
-        if width <= 0: return 12
-        zoom = 10.5 - np.log(width)
-        return min(max(zoom, 10), 15) 
-
     def add_boundary_to_map(geom):
-        if geom is None or geom.is_empty: return
         if isinstance(geom, Polygon):
             bx, by = geom.exterior.coords.xy
             fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
@@ -402,8 +276,7 @@ if call_data and station_data:
                 bx, by = poly.exterior.coords.xy
                 fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
 
-    if show_boundaries:
-        add_boundary_to_map(city_boundary_geom)
+    add_boundary_to_map(city_boundary)
     
     if len(calls_in_city) > 0:
         sample_size = min(5000, len(calls_in_city))
@@ -426,9 +299,8 @@ if call_data and station_data:
                 hoverinfo='name'
             ))
 
-    dynamic_zoom = calculate_zoom(min_lon, max_lon)
-    fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": center_lat, "lon": center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
+    fig.update_layout(map_style="open-street-map", map_zoom=12, map_center={"lat": city_boundary.centroid.y, "lon": city_boundary.centroid.x}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
     st.plotly_chart(fig, width='stretch')
 
 else:
-    st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+    st.info("👋 Upload CSV data to begin. The map will auto-select the jurisdiction from the library.")
