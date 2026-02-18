@@ -165,15 +165,12 @@ if call_data and station_data:
             st.warning("Select at least one jurisdiction to see boundaries.")
             active_gdf = None
     
-    # --- DATA CLEANING & BOUNDS CALCULATION (CRITICAL) ---
-    # 1. Merge all points
+    # --- DATA CLEANING & BOUNDS CALCULATION ---
     data_points = pd.concat([df_calls[['lat', 'lon']], df_stations_all[['lat', 'lon']]])
-    
-    # 2. Hard Filter: Remove 0,0 and invalid coords
     data_points = data_points.dropna()
     data_points = data_points[(data_points.lat.abs() > 1) & (data_points.lon.abs() > 1)]
 
-    # 3. Statistical Filter: Remove Top/Bottom 1% Outliers (The "Typo" Fix)
+    # Statistical Filter (Typo Fix)
     if not data_points.empty:
         q_low = data_points.quantile(0.01)
         q_high = data_points.quantile(0.99)
@@ -183,14 +180,12 @@ if call_data and station_data:
             (data_points.lon >= q_low.lon) & (data_points.lon <= q_high.lon)
         ]
         
-        # If filtering killed everything (rare), revert to original
         if clean_points.empty:
             clean_points = data_points
             
         min_lon, min_lat = clean_points['lon'].min(), clean_points['lat'].min()
         max_lon, max_lat = clean_points['lon'].max(), clean_points['lat'].max()
     else:
-        # Default fallback (Kansas) if NO valid data exists
         min_lat, max_lat, min_lon, max_lon = 39.0, 40.0, -98.0, -97.0
 
     # Auto-Calc UTM
@@ -199,41 +194,43 @@ if call_data and station_data:
     utm_zone = int((center_lon + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
 
-    # --- GEOMETRY PROCESSING ---
+    # --- GEOMETRY PROCESSING (CRASH PROOF) ---
     city_m = None
     city_boundary_geom = None
     full_boundary = None
     
     if active_gdf is not None and not active_gdf.empty:
         try:
-            if hasattr(active_gdf.geometry, 'union_all'):
-                full_boundary = active_gdf.geometry.union_all()
+            # 1. Safe Merge (Buffer 0 trick fixes topology errors)
+            # This prevents crashes when merging complex adjacent polygons
+            polys = active_gdf.geometry.buffer(0.0001).unary_union
+            if isinstance(polys, (Polygon, MultiPolygon)):
+                full_boundary = polys.buffer(-0.0001) # Shrink back
             else:
-                full_boundary = unary_union(active_gdf.geometry)
-            
-            # Create Focus Box with 10% padding based on CLEAN data
+                full_boundary = unary_union(active_gdf.geometry) # Fallback
+
+            # 2. Focus Box Clip
             lat_pad = max((max_lat - min_lat) * 0.1, 0.02)
             lon_pad = max((max_lon - min_lon) * 0.1, 0.02)
             focus_box = box(min_lon - lon_pad, min_lat - lat_pad, max_lon + lon_pad, max_lat + lat_pad)
 
-            # Visually clip boundary
             city_boundary_geom = full_boundary.intersection(focus_box)
             
-            # Project for Analysis
-            if hasattr(active_gdf.geometry, 'union_all'):
-                city_m = active_gdf.to_crs(epsg=epsg_code).geometry.union_all()
-            else:
-                city_m = unary_union(active_gdf.to_crs(epsg=epsg_code).geometry)
+            # 3. Project for Analysis
+            active_utm = active_gdf.to_crs(epsg=epsg_code)
+            city_m = unary_union(active_utm.geometry)
                 
         except Exception as e:
-            st.error(f"Geometry Error: {e}")
+            st.error(f"Geometry Merge Error: {e}")
 
     # --- FILTER CALLS ---
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
     
     if full_boundary and not full_boundary.is_empty:
-        # Keep calls only inside the selected jurisdictions
-        calls_in_city = gdf_calls[gdf_calls.within(full_boundary)].to_crs(epsg=epsg_code)
+        try:
+            calls_in_city = gdf_calls[gdf_calls.within(full_boundary)].to_crs(epsg=epsg_code)
+        except:
+            calls_in_city = gdf_calls.to_crs(epsg=epsg_code) # Fallback if within fails
     else:
         calls_in_city = gdf_calls.to_crs(epsg=epsg_code)
         
@@ -251,7 +248,10 @@ if call_data and station_data:
             
             full_buf = s_pt_m.buffer(radius_m)
             if city_m is not None and not city_m.is_empty:
-                clipped_buf = full_buf.intersection(city_m)
+                try:
+                    clipped_buf = full_buf.intersection(city_m)
+                except:
+                    clipped_buf = full_buf
             else:
                 clipped_buf = full_buf 
                 
