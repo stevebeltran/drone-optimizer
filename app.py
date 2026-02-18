@@ -54,7 +54,7 @@ def get_circle_coords(lat, lon, r_mi=2):
 def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     """
     Scans library and returns polygons that intersect with data points.
-    We pass DataFrames to avoid caching errors.
+    Passes DataFrames to avoid caching errors.
     """
     # 1. Prepare Points
     points_list = []
@@ -67,8 +67,9 @@ def consolidate_jurisdictions(calls_df, stations_df, shapefile_dir):
     
     all_points = pd.concat(points_list)
     
-    # Remove obvious outliers (0,0) to prevent 'Ocean' view issues
-    all_points = all_points[(all_points.lat > 1) & (all_points.lon < -1)]
+    # FILTER: Remove (0,0) and Nulls before spatial join
+    all_points = all_points.dropna()
+    all_points = all_points[(all_points.lat.abs() > 0.1) & (all_points.lon.abs() > 0.1)]
     
     points_gdf = gpd.GeoDataFrame(
         all_points, 
@@ -147,12 +148,11 @@ if call_data and station_data:
     st.markdown("---")
     ctrl_col1, ctrl_col2 = st.columns([1, 2])
     
-    # --- MULTI-SELECT WIDGET (NEW) ---
+    # --- MULTI-SELECT WIDGET ---
     active_gdf = None
     if master_gdf is not None:
         all_jurisdictions = sorted(master_gdf['DISPLAY_NAME'].unique())
         
-        # Default to ALL selected, user can uncheck
         selected_jurisdictions = ctrl_col1.multiselect(
             "📍 Select Jurisdictions (Filter)", 
             options=all_jurisdictions, 
@@ -162,9 +162,43 @@ if call_data and station_data:
         if selected_jurisdictions:
             active_gdf = master_gdf[master_gdf['DISPLAY_NAME'].isin(selected_jurisdictions)]
         else:
-            st.warning("Please select at least one jurisdiction to see boundaries.")
+            st.warning("Select at least one jurisdiction to see boundaries.")
             active_gdf = None
     
+    # --- DATA CLEANING & BOUNDS CALCULATION (CRITICAL) ---
+    # 1. Merge all points
+    data_points = pd.concat([df_calls[['lat', 'lon']], df_stations_all[['lat', 'lon']]])
+    
+    # 2. Hard Filter: Remove 0,0 and invalid coords
+    data_points = data_points.dropna()
+    data_points = data_points[(data_points.lat.abs() > 1) & (data_points.lon.abs() > 1)]
+
+    # 3. Statistical Filter: Remove Top/Bottom 1% Outliers (The "Typo" Fix)
+    if not data_points.empty:
+        q_low = data_points.quantile(0.01)
+        q_high = data_points.quantile(0.99)
+        
+        clean_points = data_points[
+            (data_points.lat >= q_low.lat) & (data_points.lat <= q_high.lat) &
+            (data_points.lon >= q_low.lon) & (data_points.lon <= q_high.lon)
+        ]
+        
+        # If filtering killed everything (rare), revert to original
+        if clean_points.empty:
+            clean_points = data_points
+            
+        min_lon, min_lat = clean_points['lon'].min(), clean_points['lat'].min()
+        max_lon, max_lat = clean_points['lon'].max(), clean_points['lat'].max()
+    else:
+        # Default fallback (Kansas) if NO valid data exists
+        min_lat, max_lat, min_lon, max_lon = 39.0, 40.0, -98.0, -97.0
+
+    # Auto-Calc UTM
+    center_lon = (min_lon + max_lon) / 2
+    center_lat = (min_lat + max_lat) / 2
+    utm_zone = int((center_lon + 180) / 6) + 1
+    epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
+
     # --- GEOMETRY PROCESSING ---
     city_m = None
     city_boundary_geom = None
@@ -172,36 +206,20 @@ if call_data and station_data:
     
     if active_gdf is not None and not active_gdf.empty:
         try:
-            # Combine selected polygons into one shape
             if hasattr(active_gdf.geometry, 'union_all'):
                 full_boundary = active_gdf.geometry.union_all()
             else:
                 full_boundary = unary_union(active_gdf.geometry)
             
-            # --- AUTO CENTER ON DATA (NOT MAP) ---
-            # We calculate bounds from the DATA points to avoid "ocean" issues
-            data_points = pd.concat([df_calls[['lat', 'lon']], df_stations_all[['lat', 'lon']]])
-            # Filter out 0,0 or obvious errors
-            data_points = data_points[(data_points.lat > 1) & (data_points.lon < -1)]
-            
-            min_lon, min_lat = data_points['lon'].min(), data_points['lat'].min()
-            max_lon, max_lat = data_points['lon'].max(), data_points['lat'].max()
-            
-            # Create Focus Box with padding
+            # Create Focus Box with 10% padding based on CLEAN data
             lat_pad = max((max_lat - min_lat) * 0.1, 0.02)
             lon_pad = max((max_lon - min_lon) * 0.1, 0.02)
             focus_box = box(min_lon - lon_pad, min_lat - lat_pad, max_lon + lon_pad, max_lat + lat_pad)
 
-            # Visually clip the boundary to the focus area
+            # Visually clip boundary
             city_boundary_geom = full_boundary.intersection(focus_box)
             
-            # Auto-Calc UTM
-            center_lon = (min_lon + max_lon) / 2
-            center_lat = (min_lat + max_lat) / 2
-            utm_zone = int((center_lon + 180) / 6) + 1
-            epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
-            
-            # Project for Area Analysis (using full un-clipped boundary for accuracy)
+            # Project for Analysis
             if hasattr(active_gdf.geometry, 'union_all'):
                 city_m = active_gdf.to_crs(epsg=epsg_code).geometry.union_all()
             else:
@@ -209,16 +227,6 @@ if call_data and station_data:
                 
         except Exception as e:
             st.error(f"Geometry Error: {e}")
-    else:
-        # Fallback if no boundary selected
-        data_points = pd.concat([df_calls[['lat', 'lon']], df_stations_all[['lat', 'lon']]])
-        data_points = data_points[(data_points.lat > 1) & (data_points.lon < -1)]
-        min_lon, min_lat = data_points['lon'].min(), data_points['lat'].min()
-        max_lon, max_lat = data_points['lon'].max(), data_points['lat'].max()
-        center_lon = (min_lon + max_lon) / 2
-        center_lat = (min_lat + max_lat) / 2
-        utm_zone = int((center_lon + 180) / 6) + 1
-        epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
 
     # --- FILTER CALLS ---
     gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
@@ -238,11 +246,9 @@ if call_data and station_data:
     if not calls_in_city.empty:
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
-            
             mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
             covered_indices = set(calls_in_city[mask]['point_idx'])
             
-            # Calculate intersection area
             full_buf = s_pt_m.buffer(radius_m)
             if city_m is not None and not city_m.is_empty:
                 clipped_buf = full_buf.intersection(city_m)
@@ -256,7 +262,6 @@ if call_data and station_data:
 
     # --- 4. OPTIMIZER ---
     st.sidebar.header("🎯 Optimizer Controls")
-    
     opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
     max_k = len(station_metadata) if station_metadata else 1
@@ -356,7 +361,6 @@ if call_data and station_data:
         zoom = 10.5 - np.log(width)
         return min(max(zoom, 10), 15) 
 
-    # Draw Display Boundary (Only if checked)
     def add_boundary_to_map(geom):
         if geom is None or geom.is_empty: return
         if isinstance(geom, Polygon):
@@ -391,7 +395,6 @@ if call_data and station_data:
                 hoverinfo='name'
             ))
 
-    # Center map on DATA center
     dynamic_zoom = calculate_zoom(min_lon, max_lon)
     fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": center_lat, "lon": center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
     st.plotly_chart(fig, width='stretch')
