@@ -514,8 +514,19 @@ if call_data and station_data:
     else:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
+ # Use ESRI World Imagery for high-quality free satellite view
     fig.update_layout(
-        map_style="open-street-map", 
+        map_style="white-bg", 
+        map_layers=[
+            {
+                "below": 'traces',
+                "sourcetype": "raster",
+                "sourceattribution": "Esri, Maxar, Earthstar Geographics",
+                "source": [
+                    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                ]
+            }
+        ],
         map_zoom=dynamic_zoom, 
         map_center={"lat": center_lat, "lon": center_lon}, 
         margin={"r":0,"t":0,"l":0,"b":0}, 
@@ -526,4 +537,5 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
 
