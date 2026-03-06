@@ -40,17 +40,16 @@ def process_geo_data(shp_path, selection):
     return gdf, active_gdf, boundary, name_col
 
 # --- 3. DATA IMPORT ---
-call_data, station_data, shot_data, shape_components = None, None, None, []
+call_data, station_data, shape_components = None, None, []
 
 with st.expander("📁 Secure Data Import", expanded=st.session_state.box_open):
-    uploaded_files = st.file_uploader("Upload Incident CSVs, 'shots.csv', and Shapefiles", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload Incident CSVs and Shapefiles", accept_multiple_files=True)
 
 if uploaded_files:
     for f in uploaded_files:
         fname = f.name.lower()
         if fname == "calls.csv": call_data = f
         elif fname == "stations.csv": station_data = f
-        elif fname == "shots.csv": shot_data = f
         elif any(fname.endswith(ext) for ext in ['.shp', '.shx', '.dbf', '.prj']):
             shape_components.append(f)
 
@@ -175,14 +174,6 @@ if call_data and station_data and len(shape_components) >= 3:
         st.sidebar.markdown("---")
         st.sidebar.header("🔍 Layer Controls")
         
-        show_shots = False
-        df_shots = None
-        if shot_data:
-            show_shots = st.sidebar.toggle("Show Shot Detection Events", value=False)
-            if show_shots:
-                try: df_shots = pd.read_csv(shot_data)
-                except: pass
-        
         show_suggestions = st.sidebar.toggle("Show Suggested Coverage Sites", value=False)
 
         # --- METRICS ---
@@ -302,19 +293,7 @@ Status: {h_label}
             hoverinfo='skip'
         ))
 
-        # 3. Shot Detection
-        if show_shots and df_shots is not None:
-             fig.add_trace(go.Scattermap(
-                lat=df_shots['lat'],
-                lon=df_shots['lon'],
-                mode='markers',
-                marker=dict(symbol='triangle', size=10, color='#FF4500', opacity=0.9),
-                name="Shot Detection",
-                text=df_shots['point_id'] if 'point_id' in df_shots.columns else None,
-                hoverinfo='text+lat+lon'
-            ))
-
-        # 4. SUGGESTED SITES (Controlled by Toggle)
+        # 3. SUGGESTED SITES (Controlled by Toggle)
         if show_suggestions:
             for i, c in enumerate(suggested_coords):
                 angles = np.linspace(0, 2*np.pi, 100)
@@ -341,7 +320,7 @@ Status: {h_label}
                     hoverinfo='text'
                 ))
         
-        # 5. Active Stations Plotting Function
+        # 4. Active Stations Plotting Function
         all_st_names = df_stations_all['name'].tolist()
 
         def plot_drone_ring(fig, s, radius_miles, color, drone_type):
