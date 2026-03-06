@@ -498,7 +498,7 @@ if call_data and station_data:
             hoverinfo='skip'
         ))
 
-    # Add Drone Rings using SCATTERMAPBOX (CRASH BUG FIXED: UID REMOVED)
+    # Add Drone Rings using SCATTERMAPBOX 
     for i, row in df_stations_all.iterrows():
         s_name = row['name']
         color = STATION_COLORS[i % len(STATION_COLORS)]
@@ -566,7 +566,8 @@ if call_data and station_data:
         font=dict(size=18)
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    # ---> FIX FOR SCROLL ZOOM HERE <---
+    st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
