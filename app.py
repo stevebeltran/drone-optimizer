@@ -13,6 +13,16 @@ import simplekml
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
+
+# --- LOGO ---
+# Save your logo file in the same folder as this script. 
+# Change "logo.png" to your actual file name (e.g., "brinc_logo.jpg")
+try:
+    st.sidebar.image("logo.png", use_container_width=True)
+except FileNotFoundError:
+    # If the logo isn't found, we just show a text placeholder or nothing
+    pass
+
 st.title("🛰️ brinc COS Drone Optimizer")
 
 # --- CONFIGURATION ---
@@ -386,7 +396,7 @@ if call_data and station_data:
         if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
         elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
         elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
-        else: h_color, h_label = "#dc3545", "FUNDAMENTAL"
+        else: h_color, h_label = "#dc3545", "CRITICAL"
         
         st.markdown(f"""
             <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
