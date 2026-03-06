@@ -49,7 +49,6 @@ st.markdown(
 try:
     st.sidebar.image("logo.png", use_container_width=True)
 except FileNotFoundError:
-    # If the logo isn't found, we just show a text placeholder or nothing
     pass
 
 st.title("🛰️ BRINC COS Drone Optimizer")
@@ -111,11 +110,9 @@ def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_na
     fol_rings = kml.newfolder(name="Coverage Rings")
 
     def add_kml_station(row, radius, color, name_prefix):
-        # Point
         pnt = fol_stations.newpoint(name=f"{name_prefix} {row['name']}")
         pnt.coords = [(row['lon'], row['lat'])]
         pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/paddle/blu-blank.png'
-        # Ring
         lats, lons = get_circle_coords(row['lat'], row['lon'], r_mi=radius)
         ring_coords = list(zip(lons, lats))
         ring_coords.append(ring_coords[0])
@@ -125,11 +122,9 @@ def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_na
         pol.style.linestyle.width = 2
         pol.style.polystyle.color = simplekml.Color.changealphaint(60, color)
 
-    # Add Responders (Blue, 2-Mile)
     for _, row in df_stations_all[df_stations_all['name'].isin(active_resp_names)].iterrows():
         add_kml_station(row, 2.0, simplekml.Color.blue, "[Responder]")
         
-    # Add Guardians (Orange, 8-Mile)
     for _, row in df_stations_all[df_stations_all['name'].isin(active_guard_names)].iterrows():
         add_kml_station(row, 8.0, simplekml.Color.orange, "[Guardian]")
 
@@ -305,14 +300,12 @@ if call_data and station_data:
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
             
-            # Responder Profile (2-Mile)
             mask_2m = calls_in_city.geometry.distance(s_pt_m) <= radius_resp_m
             indices_2m = set(calls_in_city[mask_2m]['point_idx'])
             full_buf_2m = s_pt_m.buffer(radius_resp_m)
             try: clipped_2m = full_buf_2m.intersection(city_m)
             except: clipped_2m = full_buf_2m
 
-            # Guardian Profile (8-Mile)
             mask_8m = calls_in_city.geometry.distance(s_pt_m) <= radius_guard_m
             indices_8m = set(calls_in_city[mask_8m]['point_idx'])
             full_buf_8m = s_pt_m.buffer(radius_guard_m)
@@ -343,7 +336,6 @@ if call_data and station_data:
         st.error("⚠️ Over-Deployment: Total requested drones exceed available stations.")
     elif k_responder > 0 or k_guardian > 0:
         
-        # Calculate possible combinations
         total_resp_combos = math.comb(n, k_responder)
         total_guard_combos = math.comb(n - k_responder, k_guardian) if n >= k_responder else 0
         total_possible = total_resp_combos * total_guard_combos
@@ -470,12 +462,10 @@ if call_data and station_data:
         if geom is None or geom.is_empty: return
         if isinstance(geom, Polygon):
             bx, by = geom.exterior.coords.xy
-            # Added UID here
             fig.add_trace(go.Scattermap(uid="boundary", mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
         elif isinstance(geom, MultiPolygon):
             for i, poly in enumerate(geom.geoms):
                 bx, by = poly.exterior.coords.xy
-                # Added UID here
                 fig.add_trace(go.Scattermap(uid=f"boundary_{i}", mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
 
     if show_boundaries:
@@ -483,7 +473,6 @@ if call_data and station_data:
         
     if len(calls_in_city) > 0:
         display_calls = calls_in_city.sample(min(5000, len(calls_in_city))).to_crs(epsg=4326)
-        # Added UID here
         fig.add_trace(go.Scattermap(uid="incident_data", lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
 
     all_names = df_stations_all['name'].tolist()
@@ -491,7 +480,6 @@ if call_data and station_data:
     def plot_ring(s, radius_mi, drone_type):
         color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
         clats, clons = get_circle_coords(s['lat'], s['lon'], r_mi=radius_mi)
-        # Added UID here
         fig.add_trace(go.Scattermap(
             uid=f"ring_{drone_type}_{s['name']}",
             lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
@@ -499,11 +487,9 @@ if call_data and station_data:
             line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
             name=f"{s['name']} ({drone_type})", hoverinfo='name'))
 
-    # Plot Responders
     for s in active_resp_data:
         plot_ring(s, 2.0, "Responder")
         
-    # Plot Guardians
     for s in active_guard_data:
         plot_ring(s, 8.0, "Guardian")
 
@@ -523,13 +509,10 @@ if call_data and station_data:
     # --- THE ZOOM/PAN PRESERVATION FIX ---
     data_signature = f"{len(calls_in_city)}_{center_lat:.4f}_{center_lon:.4f}"
 
-    # Build the map dictionary configuration
-    map_config = dict(
-        uirevision=data_signature,
-        zoom=dynamic_zoom,
-        center=dict(lat=center_lat, lon=center_lon),
-        style="white-bg" if show_satellite else "open-street-map"
-    )
+    map_config = {
+        "uirevision": data_signature,
+        "style": "white-bg" if show_satellite else "open-street-map"
+    }
     
     if show_satellite:
         map_config["layers"] = [
@@ -543,7 +526,13 @@ if call_data and station_data:
             }
         ]
 
-    # Explicitly pass the top-level uirevision AND the map layout dictionary
+    # MAGIC FIX: We check if the dataset is brand new. If it is new, we add the zoom and center to the config. 
+    # If it is NOT new (you just touched a slider), we leave zoom and center completely out of the config so Plotly preserves your position!
+    if st.session_state.get("current_map_data") != data_signature:
+        st.session_state["current_map_data"] = data_signature
+        map_config["zoom"] = dynamic_zoom
+        map_config["center"] = {"lat": center_lat, "lon": center_lon}
+
     fig.update_layout(
         uirevision=data_signature,
         map=map_config,
