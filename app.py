@@ -20,7 +20,7 @@ st.markdown(
     <style>
     /* 1. Global font size for standard text */
     html, body, [class*="css"]  {
-        font-size: 18px !important; 
+        font-size: 20px !important; 
     }
 
     /* 2. Change the font size of the Radio Button Options (Maximize Land Coverage, etc.) */
@@ -36,7 +36,7 @@ st.markdown(
 
     /* 4. Change the font size of the Multi-Select box items */
     div[data-baseweb="select"] span {
-        font-size: 18px !important;
+        font-size: 20px !important;
     }
     </style>
     """,
@@ -526,3 +526,4 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
