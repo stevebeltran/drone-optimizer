@@ -518,6 +518,7 @@ if call_data and station_data:
     # Determine Base Map based on Toggle
     if show_satellite:
         fig.update_layout(
+            uirevision="constant",
             map_style="white-bg", 
             map_layers=[
                 {
@@ -537,6 +538,7 @@ if call_data and station_data:
         )
     else:
         fig.update_layout(
+            uirevision="constant",
             map_style="open-street-map", 
             map_zoom=dynamic_zoom, 
             map_center={"lat": center_lat, "lon": center_lon}, 
@@ -545,7 +547,7 @@ if call_data and station_data:
             font=dict(size=18)
         )
 
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
