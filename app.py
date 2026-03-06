@@ -392,7 +392,7 @@ if call_data and station_data:
     st.markdown("---")
     if show_health:
         norm_redundancy = min(overlap_perc / 35.0, 1.0) * 100
-        health_score = (calls_covered_perc * 0.50) + (area_covered_perc * 0.25) + (norm_redundancy * 0.25)
+        health_score = (calls_covered_perc * 0.50) + (area_covered_perc * 0.35) + (norm_redundancy * 0.15)
         if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
         elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
         elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
@@ -490,3 +490,4 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
