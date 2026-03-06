@@ -475,24 +475,48 @@ if call_data and station_data:
         display_calls = calls_in_city.sample(min(5000, len(calls_in_city))).to_crs(epsg=4326)
         fig.add_trace(go.Scattermap(uid="incident_data", lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
 
-    all_names = df_stations_all['name'].tolist()
+    # =========================================================================
+    # THE ZOOM PRESERVATION FIX: THE FIXED TRACE TECHNIQUE
+    # Instead of deleting and adding rings, we add a permanent shape for EVERY 
+    # station in the file. If it's inactive, we just empty out its coordinates!
+    # Because the number of traces NEVER changes, Plotly never throws out your zoom!
+    # =========================================================================
+    for i, row in df_stations_all.iterrows():
+        s_name = row['name']
+        color = STATION_COLORS[i % len(STATION_COLORS)]
 
-    def plot_ring(s, radius_mi, drone_type):
-        color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
-        clats, clons = get_circle_coords(s['lat'], s['lon'], r_mi=radius_mi)
+        if s_name in active_resp_names:
+            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=2.0)
+            lat_list = list(clats) + [None, row['lat']]
+            lon_list = list(clons) + [None, row['lon']]
+            lbl = f"{s_name} (Responder)"
+            marker_sizes = [0]*len(clats) + [0, 20]
+            show_in_legend = True
+        elif s_name in active_guard_names:
+            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=8.0)
+            lat_list = list(clats) + [None, row['lat']]
+            lon_list = list(clons) + [None, row['lon']]
+            lbl = f"{s_name} (Guardian)"
+            marker_sizes = [0]*len(clats) + [0, 20]
+            show_in_legend = True
+        else:
+            lat_list, lon_list = [], [] # Hidden background shape
+            lbl = f"{s_name} (Inactive)"
+            marker_sizes = []
+            show_in_legend = False
+
         fig.add_trace(go.Scattermap(
-            uid=f"ring_{drone_type}_{s['name']}",
-            lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
-            mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
-            line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
-            name=f"{s['name']} ({drone_type})", hoverinfo='name'))
+            uid=f"station_{s_name}", # Lock the UID
+            lat=lat_list, lon=lon_list, 
+            mode='lines+markers', 
+            marker=dict(size=marker_sizes, color=color), 
+            line=dict(color=color, width=4.5), 
+            fill='toself', fillcolor='rgba(0,0,0,0)', 
+            name=lbl, hoverinfo='name',
+            showlegend=show_in_legend
+        ))
 
-    for s in active_resp_data:
-        plot_ring(s, 2.0, "Responder")
-        
-    for s in active_guard_data:
-        plot_ring(s, 8.0, "Guardian")
-
+    # Determine default zoom based on all dots in the city
     data_points = calls_in_city.to_crs(epsg=4326)
     if not data_points.empty:
         q_low = data_points.geometry.x.quantile(0.01)
@@ -506,12 +530,10 @@ if call_data and station_data:
     else:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
-    # --- THE ZOOM/PAN PRESERVATION FIX ---
-    data_signature = f"{len(calls_in_city)}_{center_lat:.4f}_{center_lon:.4f}"
+    # UI Revision: Hard lock this so it NEVER resets on interaction
+    data_signature = "LOCKED_MAP_MEMORY"
 
-    # Build the map configuration WITHOUT zoom or center!
     map_config = {
-        "uirevision": data_signature,
         "style": "white-bg" if show_satellite else "open-street-map"
     }
     
@@ -527,9 +549,9 @@ if call_data and station_data:
             }
         ]
 
-    # ONLY inject zoom and center into the config if the dataset is brand new!
-    if st.session_state.get("current_map_data") != data_signature:
-        st.session_state["current_map_data"] = data_signature
+    # Only pass explicit zoom logic if the actual jurisdiction changes
+    if st.session_state.get("last_loaded_jurisdiction") != str(selected_labels):
+        st.session_state["last_loaded_jurisdiction"] = str(selected_labels)
         map_config["zoom"] = dynamic_zoom
         map_config["center"] = {"lat": center_lat, "lon": center_lon}
 
