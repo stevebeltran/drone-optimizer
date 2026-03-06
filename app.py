@@ -470,25 +470,30 @@ if call_data and station_data:
         if geom is None or geom.is_empty: return
         if isinstance(geom, Polygon):
             bx, by = geom.exterior.coords.xy
-            fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
+            # Added UID here
+            fig.add_trace(go.Scattermap(uid="boundary", mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
         elif isinstance(geom, MultiPolygon):
-            for poly in geom.geoms:
+            for i, poly in enumerate(geom.geoms):
                 bx, by = poly.exterior.coords.xy
-                fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
+                # Added UID here
+                fig.add_trace(go.Scattermap(uid=f"boundary_{i}", mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
 
     if show_boundaries:
         add_boundary_to_map(city_boundary_geom)
         
     if len(calls_in_city) > 0:
         display_calls = calls_in_city.sample(min(5000, len(calls_in_city))).to_crs(epsg=4326)
-        fig.add_trace(go.Scattermap(lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
+        # Added UID here
+        fig.add_trace(go.Scattermap(uid="incident_data", lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
 
     all_names = df_stations_all['name'].tolist()
 
     def plot_ring(s, radius_mi, drone_type):
         color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
         clats, clons = get_circle_coords(s['lat'], s['lon'], r_mi=radius_mi)
+        # Added UID here
         fig.add_trace(go.Scattermap(
+            uid=f"ring_{drone_type}_{s['name']}",
             lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
             mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
             line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
@@ -516,27 +521,18 @@ if call_data and station_data:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
     # --- THE ZOOM/PAN PRESERVATION FIX ---
-    # Create a unique fingerprint for the current uploaded dataset
     data_signature = f"{len(calls_in_city)}_{center_lat:.4f}_{center_lon:.4f}"
 
-    layout_kwargs = {
-        "uirevision": data_signature, # This links UI memory directly to your dataset!
-        "margin": {"r":0,"t":0,"l":0,"b":0}, 
-        "height": 800,
-        "font": dict(size=18)
-    }
-
-    # Here is the magic: We ONLY explicitly set the zoom and center if the dataset is brand new.
-    # If we set it every time, Streamlit overrides Plotly's memory and forces a reset!
-    if st.session_state.get("current_data_signature") != data_signature:
-        st.session_state["current_data_signature"] = data_signature
-        layout_kwargs["map_zoom"] = dynamic_zoom
-        layout_kwargs["map_center"] = {"lat": center_lat, "lon": center_lon}
-
-    # Add satellite layers if toggled
+    # Build the map dictionary configuration
+    map_config = dict(
+        uirevision=data_signature,
+        zoom=dynamic_zoom,
+        center=dict(lat=center_lat, lon=center_lon),
+        style="white-bg" if show_satellite else "open-street-map"
+    )
+    
     if show_satellite:
-        layout_kwargs["map_style"] = "white-bg"
-        layout_kwargs["map_layers"] = [
+        map_config["layers"] = [
             {
                 "below": 'traces',
                 "sourcetype": "raster",
@@ -546,11 +542,16 @@ if call_data and station_data:
                 ]
             }
         ]
-    else:
-        layout_kwargs["map_style"] = "open-street-map"
 
-    fig.update_layout(**layout_kwargs)
-    
+    # Explicitly pass the top-level uirevision AND the map layout dictionary
+    fig.update_layout(
+        uirevision=data_signature,
+        map=map_config,
+        margin={"r":0,"t":0,"l":0,"b":0}, 
+        height=800,
+        font=dict(size=18)
+    )
+
     st.plotly_chart(fig, use_container_width=True)
 
 else:
