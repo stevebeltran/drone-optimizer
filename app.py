@@ -376,7 +376,7 @@ if call_data and station_data:
             else:
                 resp_combos_list = list(itertools.combinations(station_indices, k_responder))
 
-            # ThreadPool Parallel Processing speeds this up dramatically!
+            # ThreadPool Parallel Processing
             with ThreadPoolExecutor() as executor:
                 results = list(executor.map(search_resp_combo, resp_combos_list))
                 
@@ -498,7 +498,7 @@ if call_data and station_data:
             hoverinfo='skip'
         ))
 
-    # Add Drone Rings using SCATTERMAPBOX
+    # Add Drone Rings using SCATTERMAPBOX (CRASH BUG FIXED: UID REMOVED)
     for i, row in df_stations_all.iterrows():
         s_name = row['name']
         color = STATION_COLORS[i % len(STATION_COLORS)]
@@ -539,11 +539,13 @@ if call_data and station_data:
     mapbox_config = dict(
         center=dict(lat=center_lat, lon=center_lon),
         zoom=dynamic_zoom,
-        style="white-bg" if show_satellite else "open-street-map"
+        style="open-street-map"
     )
     
-    # Inject Esri Satellite Layer if toggled
+    # Inject Esri Satellite Layer if toggled. We use "carto-positron" as a stable 
+    # base map engine underneath to prevent Mapbox interaction failures.
     if show_satellite:
+        mapbox_config["style"] = "carto-positron"
         mapbox_config["layers"] = [
             {
                 "below": 'traces',
@@ -555,11 +557,11 @@ if call_data and station_data:
             }
         ]
 
-    # Explicitly lock the uirevision to a constant string on the layout update
+    # Explicitly lock the uirevision to a constant string
     fig.update_layout(
-        uirevision="LOCKED_MAP_MEMORY",
+        uirevision="LOCKED_MAP",
         mapbox=mapbox_config,
-        margin={"r":0,"t":0,"l":0,"b":0}, 
+        margin=dict(l=0, r=0, t=0, b=0), 
         height=800,
         font=dict(size=18)
     )
