@@ -14,6 +14,35 @@ import simplekml
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
 
+# --- CUSTOM CSS FOR FONT SIZES ---
+st.markdown(
+    """
+    <style>
+    /* 1. Global font size for standard text */
+    html, body, [class*="css"]  {
+        font-size: 18px !important; 
+    }
+
+    /* 2. Change the font size of the Radio Button Options (Maximize Land Coverage, etc.) */
+    div[role="radiogroup"] label div {
+        font-size: 20px !important;
+    }
+
+    /* 3. Change the font size of the main Widget Titles (Optimization Goal:, Active Responders, etc.) */
+    .stRadio label p, .stMultiSelect label p {
+        font-size: 22px !important;
+        font-weight: bold !important;
+    }
+
+    /* 4. Change the font size of the Multi-Select box items */
+    div[data-baseweb="select"] span {
+        font-size: 18px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --- LOGO ---
 # Save your logo file in the same folder as this script. 
 # Change "logo.png" to your actual file name (e.g., "brinc_logo.jpg")
@@ -400,8 +429,8 @@ if call_data and station_data:
         
         st.markdown(f"""
             <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
-                <span style="font-size: 1.2em; font-weight: bold;">Department Health Score: {health_score:.1f}%</span>
-                <span style="font-size: 1.1em; background: rgba(0,0,0,0.2); padding: 2px 10px; border-radius: 4px;">{h_label}</span>
+                <span style="font-size: 1.5em; font-weight: bold;">Department Health Score: {health_score:.1f}%</span>
+                <span style="font-size: 1.3em; background: rgba(0,0,0,0.2); padding: 2px 10px; border-radius: 4px;">{h_label}</span>
             </div>""", unsafe_allow_html=True)
 
     m1, m2, m3, m4 = st.columns(4)
@@ -485,12 +514,15 @@ if call_data and station_data:
     else:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
-    fig.update_layout(map_style="open-street-map", map_zoom=dynamic_zoom, map_center={"lat": center_lat, "lon": center_lon}, margin={"r":0,"t":0,"l":0,"b":0}, height=800)
+    fig.update_layout(
+        map_style="open-street-map", 
+        map_zoom=dynamic_zoom, 
+        map_center={"lat": center_lat, "lon": center_lon}, 
+        margin={"r":0,"t":0,"l":0,"b":0}, 
+        height=800,
+        font=dict(size=18)
+    )
     st.plotly_chart(fig, width='stretch')
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
-
-
-
-
