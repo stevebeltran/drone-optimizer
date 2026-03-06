@@ -366,50 +366,52 @@ if call_data and station_data:
         
         station_indices = list(range(n))
         total_resp_combos = math.comb(n, k_responder)
-        total_guard_combos = math.comb(n - k_responder, k_guardian) if n >= k_responder else 0
+        total_guard_combos = math.comb(n - k_responder, k_guardian) if n >= k_responder else 1
         total_possible = total_resp_combos * total_guard_combos
         
         best_score = -1
         best_combo = None
         
-        # Core Optimization Function run via ThreadPool
-        def search_resp_combo(r_combo):
-            best_local_score = -1
-            best_local_combo = None
-            rem = [x for x in station_indices if x not in r_combo]
+        # Core Optimization Function handling BOTH sets in one pass
+        def evaluate_combo(rg_combo):
+            r_combo, g_combo = rg_combo
             
-            for g_combo in itertools.combinations(rem, k_guardian):
-                if opt_strategy == "Maximize Call Coverage":
-                    # Matrix boolean logic is thousands of times faster!
-                    cov = np.zeros(total_calls, dtype=bool)
-                    if r_combo: cov = np.logical_or(cov, resp_matrix[list(r_combo)].any(axis=0))
-                    if g_combo: cov = np.logical_or(cov, guard_matrix[list(g_combo)].any(axis=0))
-                    score = cov.sum()
-                else:
-                    # Shapely area logic for Land Coverage
-                    geos = [station_metadata[i]['clipped_2m'] for i in r_combo] + [station_metadata[i]['clipped_8m'] for i in g_combo]
-                    score = unary_union(geos).area if geos else 0.0
-                    
-                if score > best_local_score:
-                    best_local_score = score
-                    best_local_combo = (r_combo, g_combo)
-                    
-            return (best_local_score, best_local_combo)
+            if opt_strategy == "Maximize Call Coverage":
+                cov = np.zeros(total_calls, dtype=bool)
+                if r_combo: cov = np.logical_or(cov, resp_matrix[list(r_combo)].any(axis=0))
+                if g_combo: cov = np.logical_or(cov, guard_matrix[list(g_combo)].any(axis=0))
+                score = cov.sum()
+            else:
+                geos = [station_metadata[i]['clipped_2m'] for i in r_combo] + [station_metadata[i]['clipped_8m'] for i in g_combo]
+                score = unary_union(geos).area if geos else 0.0
+                
+            return (score, rg_combo)
 
         with st.spinner(f"Optimizing {min(total_possible, 3000)} configurations..."):
+            
+            # 1. Generate the combinations list (fully constrained)
             if total_possible > 3000:
                 st.toast(f"Optimization Mode: Sampling ({total_possible:,} options)")
                 sampled_combos = []
                 for _ in range(3000):
                     chosen = np.random.choice(range(n), k_responder + k_guardian, replace=False)
-                    sampled_combos.append(tuple(chosen[:k_responder]))
-                resp_combos_list = list(set(sampled_combos)) # Remove duplicates
+                    r_c = tuple(sorted(chosen[:k_responder]))
+                    g_c = tuple(sorted(chosen[k_responder:]))
+                    sampled_combos.append((r_c, g_c))
+                combos_to_test = list(set(sampled_combos))
             else:
-                resp_combos_list = list(itertools.combinations(station_indices, k_responder))
+                combos_to_test = []
+                for r_c in itertools.combinations(station_indices, k_responder):
+                    rem = [x for x in station_indices if x not in r_c]
+                    if k_guardian > 0:
+                        for g_c in itertools.combinations(rem, k_guardian):
+                            combos_to_test.append((r_c, g_c))
+                    else:
+                        combos_to_test.append((r_c, ()))
 
-            # ThreadPool Parallel Processing
+            # 2. Process strictly that list using the thread pool
             with ThreadPoolExecutor() as executor:
-                results = list(executor.map(search_resp_combo, resp_combos_list))
+                results = list(executor.map(evaluate_combo, combos_to_test))
                 
             for score, combo in results:
                 if score > best_score:
