@@ -475,13 +475,24 @@ if call_data and station_data:
     fig = go.Figure()
     
     def calculate_zoom(min_lon, max_lon, min_lat, max_lat):
-        """Calculates ideal zoom using the largest bounding dimension (width or height)."""
-        width = max_lon - min_lon
-        height = max_lat - min_lat
-        max_dim = max(width, height)
-        if max_dim <= 0: return 12
-        zoom = 10.5 - np.log(max_dim)
-        return min(max(zoom, 8), 15)
+        # Mapbox zoom levels scale by powers of 2.
+        # Zoom 0 is the whole world (360 degrees lon, ~180 degrees lat).
+        lon_diff = max_lon - min_lon
+        lat_diff = max_lat - min_lat
+        
+        if lon_diff <= 0 or lat_diff <= 0:
+            return 12
+            
+        # Calculate ideal zoom for width and height based on degree span
+        zoom_lon = np.log2(360 / lon_diff)
+        zoom_lat = np.log2(180 / lat_diff)
+        
+        # Pick the smaller zoom (most zoomed out) so the whole shape fits
+        # Subtract 0.8 to give the map a nice visual padding/margin
+        best_zoom = min(zoom_lon, zoom_lat) - 0.8
+        
+        # Clamp it to reasonable Mapbox limits so it never breaks
+        return min(max(best_zoom, 5), 18)
 
     # Add Boundaries using SCATTERMAPBOX
     if show_boundaries:
