@@ -355,6 +355,7 @@ if call_data and station_data:
     k_guardian = st.sidebar.slider("🦅 Guardian Drones (8-Mile)", 0, n, 0)
     
     show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
+    show_heatmap = st.sidebar.toggle("🔥 Show Incident Heatmap", value=False)
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     show_satellite = st.sidebar.toggle("🌍 Satellite View", value=False)
     
@@ -532,6 +533,19 @@ if call_data and station_data:
                 for poly in city_boundary_geom.geoms:
                     bx, by = poly.exterior.coords.xy
                     fig.add_trace(go.Scattermapbox(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
+
+    # Add Heatmap Layer
+    if show_heatmap and not display_calls.empty:
+        fig.add_trace(go.Densitymapbox(
+            lat=display_calls.geometry.y,
+            lon=display_calls.geometry.x,
+            z=np.ones(len(display_calls)),
+            radius=12,
+            colorscale='Inferno',
+            opacity=0.6,
+            name="Heatmap",
+            hoverinfo='skip'
+        ))
 
     # Add Incidents using SCATTERMAPBOX
     if not display_calls.empty:
