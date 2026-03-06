@@ -524,16 +524,30 @@ if call_data and station_data:
             hoverinfo='name'
         ))
 
-    if not calls_in_city.empty:
+    # CALCULATE ZOOM & CENTER BASED ON JURISDICTION BOUNDARY
+    if city_boundary_geom is not None and not city_boundary_geom.is_empty:
+        min_lon, min_lat, max_lon, max_lat = city_boundary_geom.bounds
+        center_lon = (min_lon + max_lon) / 2
+        center_lat = (min_lat + max_lat) / 2
+        dynamic_zoom = calculate_zoom(min_lon, max_lon)
+    elif not calls_in_city.empty:
         q_low = calls_in_city.geometry.x.quantile(0.01)
         q_high = calls_in_city.geometry.x.quantile(0.99)
         clean_pts = calls_in_city[(calls_in_city.geometry.x >= q_low) & (calls_in_city.geometry.x <= q_high)]
         if clean_pts.empty: clean_pts = calls_in_city
         min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
         max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
+        center_lon = (min_lon + max_lon) / 2
+        center_lat = (min_lat + max_lat) / 2
         dynamic_zoom = calculate_zoom(min_lon, max_lon)
     else:
         dynamic_zoom = 12
+
+    # --- THE ZOOM/PAN PRESERVATION FIX ---
+    # Tie the layout state purely to the underlying physical data center
+    # This automatically resets your zoom if you pick a new jurisdiction, 
+    # but strictly locks your pan/zoom if you are just moving sliders!
+    data_signature = f"LOCKED_{center_lat:.4f}_{center_lon:.4f}"
 
     # Mapbox configuration Dictionary
     mapbox_config = dict(
@@ -542,8 +556,7 @@ if call_data and station_data:
         style="open-street-map"
     )
     
-    # Inject Esri Satellite Layer if toggled. We use "carto-positron" as a stable 
-    # base map engine underneath to prevent Mapbox interaction failures.
+    # Inject Esri Satellite Layer if toggled. 
     if show_satellite:
         mapbox_config["style"] = "carto-positron"
         mapbox_config["layers"] = [
@@ -557,16 +570,16 @@ if call_data and station_data:
             }
         ]
 
-    # Explicitly lock the uirevision to a constant string
+    # Explicitly lock the uirevision to the unique coordinate signature!
     fig.update_layout(
-        uirevision="LOCKED_MAP",
+        uirevision=data_signature,
         mapbox=mapbox_config,
         margin=dict(l=0, r=0, t=0, b=0), 
         height=800,
         font=dict(size=18)
     )
 
-    # ---> FIX FOR SCROLL ZOOM HERE <---
+    # Mouse scroll Zoom enabled here
     st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
 
 else:
