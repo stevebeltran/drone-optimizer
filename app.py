@@ -10,6 +10,7 @@ import itertools
 import glob
 import math
 import simplekml
+from concurrent.futures import ThreadPoolExecutor
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
@@ -23,12 +24,12 @@ st.markdown(
         font-size: 18px !important; 
     }
 
-    /* 2. Change the font size of the Radio Button Options (Maximize Land Coverage, etc.) */
+    /* 2. Change the font size of the Radio Button Options */
     div[role="radiogroup"] label div {
         font-size: 20px !important;
     }
 
-    /* 3. Change the font size of the main Widget Titles (Optimization Goal:, Active Responders, etc.) */
+    /* 3. Change the font size of the main Widget Titles */
     .stRadio label p, .stMultiSelect label p {
         font-size: 22px !important;
         font-weight: bold !important;
@@ -44,8 +45,6 @@ st.markdown(
 )
 
 # --- LOGO ---
-# Save your logo file in the same folder as this script. 
-# Change "logo.png" to your actual file name (e.g., "brinc_logo.jpg")
 try:
     st.sidebar.image("logo.png", use_container_width=True)
 except FileNotFoundError:
@@ -90,7 +89,7 @@ def get_circle_coords(lat, lon, r_mi=2.0):
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
-# --- KML EXPORT FUNCTION (UPDATED FOR DUAL FLEET) ---
+# --- KML EXPORT FUNCTION ---
 def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_names, calls_gdf):
     kml = simplekml.Kml()
     
@@ -128,7 +127,7 @@ def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_na
     for _, row in df_stations_all[df_stations_all['name'].isin(active_guard_names)].iterrows():
         add_kml_station(row, 8.0, simplekml.Color.orange, "[Guardian]")
 
-    # 3. Add Sample of Calls (Also given fixed random state here for consistency!)
+    # 3. Add Sample of Calls
     fol_calls = kml.newfolder(name="Incident Data (Sample)")
     calls_export = calls_gdf.to_crs(epsg=4326)
     if len(calls_export) > 2000:
@@ -244,11 +243,7 @@ if call_data and station_data:
     options_map = dict(zip(master_gdf['LABEL'], master_gdf['DISPLAY_NAME']))
     all_options = master_gdf['LABEL'].tolist()
     
-    selected_labels = ctrl_col1.multiselect(
-        "📍 Active Jurisdictions", 
-        options=all_options, 
-        default=all_options
-    )
+    selected_labels = ctrl_col1.multiselect("📍 Active Jurisdictions", options=all_options, default=all_options)
     
     if not selected_labels:
         st.warning("Please select at least one jurisdiction.")
@@ -267,7 +262,6 @@ if call_data and station_data:
     
     try:
         active_utm = active_gdf.to_crs(epsg=epsg_code)
-        
         if hasattr(active_utm.geometry, 'union_all'):
             full_boundary_utm = active_utm.geometry.buffer(0.1).union_all().buffer(-0.1)
         else:
@@ -275,7 +269,6 @@ if call_data and station_data:
             
         city_m = full_boundary_utm
         city_boundary_geom = gpd.GeoSeries([full_boundary_utm], crs=epsg_code).to_crs(epsg=4326).iloc[0]
-        
     except Exception as e:
         st.error(f"Geometry Error: {e}")
         st.stop()
@@ -288,41 +281,48 @@ if call_data and station_data:
     except:
         calls_in_city = gdf_calls_utm
         
-    calls_in_city['point_idx'] = range(len(calls_in_city))
-    
-    # --- PRE-CALC DUAL PROFILES ---
+    # --- PRE-CALC DUAL PROFILES (USING FAST NUMPY ARRAYS) ---
     radius_resp_m = 3218.69   # 2 Miles
     radius_guard_m = 12874.75 # 8 Miles
     
     station_metadata = []
+    total_calls = len(calls_in_city)
+    n = len(df_stations_all)
+    
+    resp_matrix = np.zeros((n, total_calls), dtype=bool)
+    guard_matrix = np.zeros((n, total_calls), dtype=bool)
     
     if not calls_in_city.empty:
+        # Convert map coordinates to a numpy array for blazing fast calculations
+        calls_array = np.array(list(zip(calls_in_city.geometry.x, calls_in_city.geometry.y)))
+        
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
             
-            mask_2m = calls_in_city.geometry.distance(s_pt_m) <= radius_resp_m
-            indices_2m = set(calls_in_city[mask_2m]['point_idx'])
+            # Fast vectorized distance math
+            dists = np.sqrt((calls_array[:,0] - s_pt_m.x)**2 + (calls_array[:,1] - s_pt_m.y)**2)
+            
+            resp_matrix[i, :] = dists <= radius_resp_m
+            guard_matrix[i, :] = dists <= radius_guard_m
+
+            # Geometric profiles for Map drawing and Land coverage
             full_buf_2m = s_pt_m.buffer(radius_resp_m)
             try: clipped_2m = full_buf_2m.intersection(city_m)
             except: clipped_2m = full_buf_2m
 
-            mask_8m = calls_in_city.geometry.distance(s_pt_m) <= radius_guard_m
-            indices_8m = set(calls_in_city[mask_8m]['point_idx'])
             full_buf_8m = s_pt_m.buffer(radius_guard_m)
             try: clipped_8m = full_buf_8m.intersection(city_m)
             except: clipped_8m = full_buf_8m
                 
             station_metadata.append({
                 'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
-                'clipped_2m': clipped_2m, 'indices_2m': indices_2m,
-                'clipped_8m': clipped_8m, 'indices_8m': indices_8m
+                'clipped_2m': clipped_2m, 'clipped_8m': clipped_8m
             })
 
     # --- OPTIMIZER CONTROLS ---
     st.sidebar.header("🎯 Optimizer Controls")
     opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
-    n = len(station_metadata)
     k_responder = st.sidebar.slider("🚁 Responder Drones (2-Mile)", 0, n, min(1, n))
     k_guardian = st.sidebar.slider("🦅 Guardian Drones (8-Mile)", 0, n, 0)
     
@@ -336,42 +336,57 @@ if call_data and station_data:
         st.error("⚠️ Over-Deployment: Total requested drones exceed available stations.")
     elif k_responder > 0 or k_guardian > 0:
         
+        station_indices = list(range(n))
         total_resp_combos = math.comb(n, k_responder)
         total_guard_combos = math.comb(n - k_responder, k_guardian) if n >= k_responder else 0
         total_possible = total_resp_combos * total_guard_combos
         
-        combos = []
-        if total_possible > 3000:
-            st.toast(f"Optimization Mode: Sampling ({total_possible:,} options)")
-            for _ in range(3000):
-                chosen = np.random.choice(range(n), k_responder + k_guardian, replace=False)
-                r_c = tuple(chosen[:k_responder])
-                g_c = tuple(chosen[k_responder:])
-                combos.append((r_c, g_c))
-        else:
-            stations_idx = list(range(n))
-            for r_c in itertools.combinations(stations_idx, k_responder):
-                rem = [x for x in stations_idx if x not in r_c]
-                for g_c in itertools.combinations(rem, k_guardian):
-                    combos.append((r_c, g_c))
-        
-        max_val = -1
+        best_score = -1
         best_combo = None
         
-        with st.spinner(f"Optimizing {len(combos)} configurations..."):
-            for r_combo, g_combo in combos:
+        # Core Optimization Function run via ThreadPool
+        def search_resp_combo(r_combo):
+            best_local_score = -1
+            best_local_combo = None
+            rem = [x for x in station_indices if x not in r_combo]
+            
+            for g_combo in itertools.combinations(rem, k_guardian):
                 if opt_strategy == "Maximize Call Coverage":
-                    union_set = set().union(*(station_metadata[i]['indices_2m'] for i in r_combo), 
-                                            *(station_metadata[i]['indices_8m'] for i in g_combo))
-                    val = len(union_set)
+                    # Matrix boolean logic is thousands of times faster!
+                    cov = np.zeros(total_calls, dtype=bool)
+                    if r_combo: cov = np.logical_or(cov, resp_matrix[list(r_combo)].any(axis=0))
+                    if g_combo: cov = np.logical_or(cov, guard_matrix[list(g_combo)].any(axis=0))
+                    score = cov.sum()
                 else:
-                    union_geo = unary_union([station_metadata[i]['clipped_2m'] for i in r_combo] + 
-                                            [station_metadata[i]['clipped_8m'] for i in g_combo])
-                    val = union_geo.area
+                    # Shapely area logic for Land Coverage
+                    geos = [station_metadata[i]['clipped_2m'] for i in r_combo] + [station_metadata[i]['clipped_8m'] for i in g_combo]
+                    score = unary_union(geos).area if geos else 0.0
+                    
+                if score > best_local_score:
+                    best_local_score = score
+                    best_local_combo = (r_combo, g_combo)
+                    
+            return (best_local_score, best_local_combo)
+
+        with st.spinner(f"Optimizing {min(total_possible, 3000)} configurations..."):
+            if total_possible > 3000:
+                st.toast(f"Optimization Mode: Sampling ({total_possible:,} options)")
+                sampled_combos = []
+                for _ in range(3000):
+                    chosen = np.random.choice(range(n), k_responder + k_guardian, replace=False)
+                    sampled_combos.append(tuple(chosen[:k_responder]))
+                resp_combos_list = list(set(sampled_combos)) # Remove duplicates
+            else:
+                resp_combos_list = list(itertools.combinations(station_indices, k_responder))
+
+            # ThreadPool Parallel Processing speeds this up dramatically!
+            with ThreadPoolExecutor() as executor:
+                results = list(executor.map(search_resp_combo, resp_combos_list))
                 
-                if val > max_val:
-                    max_val = val
-                    best_combo = (r_combo, g_combo)
+            for score, combo in results:
+                if score > best_score:
+                    best_score = score
+                    best_combo = combo
             
             if best_combo is not None:
                 r_best, g_best = best_combo
@@ -390,18 +405,23 @@ if call_data and station_data:
     # --- METRICS CALCULATION ---
     area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
     
-    active_resp_data = [s for s in station_metadata if s['name'] in active_resp_names]
-    active_guard_data = [s for s in station_metadata if s['name'] in active_guard_names]
+    active_resp_idx = [i for i, s in enumerate(station_metadata) if s['name'] in active_resp_names]
+    active_guard_idx = [i for i, s in enumerate(station_metadata) if s['name'] in active_guard_names]
+    
+    active_resp_data = [station_metadata[i] for i in active_resp_idx]
+    active_guard_data = [station_metadata[i] for i in active_guard_idx]
     
     active_geos = [s['clipped_2m'] for s in active_resp_data] + [s['clipped_8m'] for s in active_guard_data]
-    active_indices = [s['indices_2m'] for s in active_resp_data] + [s['indices_8m'] for s in active_guard_data]
 
     if active_geos:
         if not city_m.is_empty:
             area_covered_perc = (unary_union(active_geos).area / city_m.area) * 100
         
-        if len(calls_in_city) > 0:
-            calls_covered_perc = (len(set().union(*active_indices)) / len(calls_in_city)) * 100
+        # Fast boolean check for final display
+        if total_calls > 0:
+            cov_r = resp_matrix[active_resp_idx].any(axis=0) if active_resp_idx else np.zeros(total_calls, bool)
+            cov_g = guard_matrix[active_guard_idx].any(axis=0) if active_guard_idx else np.zeros(total_calls, bool)
+            calls_covered_perc = (np.logical_or(cov_r, cov_g).sum() / total_calls) * 100
         
         inters = []
         for i in range(len(active_geos)):
@@ -427,7 +447,7 @@ if call_data and station_data:
             </div>""", unsafe_allow_html=True)
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Incident Points", f"{len(calls_in_city):,}")
+    m1.metric("Total Incident Points", f"{total_calls:,}")
     m2.metric("Response Capacity %", f"{calls_covered_perc:.1f}%")
     m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
     m4.metric("Redundancy (Overlap)", f"{overlap_perc:.1f}%")
@@ -462,58 +482,37 @@ if call_data and station_data:
         if geom is None or geom.is_empty: return
         if isinstance(geom, Polygon):
             bx, by = geom.exterior.coords.xy
-            fig.add_trace(go.Scattermap(uid="boundary", mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
+            fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
         elif isinstance(geom, MultiPolygon):
-            for i, poly in enumerate(geom.geoms):
+            for poly in geom.geoms:
                 bx, by = poly.exterior.coords.xy
-                fig.add_trace(go.Scattermap(uid=f"boundary_{i}", mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
+                fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
 
     if show_boundaries:
         add_boundary_to_map(city_boundary_geom)
         
-    if len(calls_in_city) > 0:
-        # THE FIX IS HERE: ADDED random_state=42 SO DOTS NEVER CHANGE BETWEEN SLIDER MOVES
-        display_calls = calls_in_city.sample(min(5000, len(calls_in_city)), random_state=42).to_crs(epsg=4326)
-        fig.add_trace(go.Scattermap(uid="incident_data", lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
+    if not calls_in_city.empty:
+        # random_state ensures the sample dots don't bounce around, preserving map memory!
+        display_calls = calls_in_city.sample(min(5000, total_calls), random_state=42).to_crs(epsg=4326)
+        fig.add_trace(go.Scattermap(lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
 
     all_names = df_stations_all['name'].tolist()
 
-    for i, row in df_stations_all.iterrows():
-        s_name = row['name']
-        color = STATION_COLORS[i % len(STATION_COLORS)]
-
-        if s_name in active_resp_names:
-            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=2.0)
-            lat_list = list(clats) + [None, row['lat']]
-            lon_list = list(clons) + [None, row['lon']]
-            lbl = f"{s_name} (Responder)"
-            marker_sizes = [0]*len(clats) + [0, 20]
-            show_in_legend = True
-        elif s_name in active_guard_names:
-            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=8.0)
-            lat_list = list(clats) + [None, row['lat']]
-            lon_list = list(clons) + [None, row['lon']]
-            lbl = f"{s_name} (Guardian)"
-            marker_sizes = [0]*len(clats) + [0, 20]
-            show_in_legend = True
-        else:
-            lat_list, lon_list = [], [] # Hidden background shape
-            lbl = f"{s_name} (Inactive)"
-            marker_sizes = []
-            show_in_legend = False
-
+    def plot_ring(s, radius_mi, drone_type):
+        color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
+        clats, clons = get_circle_coords(s['lat'], s['lon'], r_mi=radius_mi)
         fig.add_trace(go.Scattermap(
-            uid=f"station_trace_{s_name}", # Lock the UID strictly to the station name
-            lat=lat_list, lon=lon_list, 
-            mode='lines+markers', 
-            marker=dict(size=marker_sizes, color=color), 
-            line=dict(color=color, width=4.5), 
-            fill='toself', fillcolor='rgba(0,0,0,0)', 
-            name=lbl, hoverinfo='name',
-            showlegend=show_in_legend
-        ))
+            lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
+            mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
+            line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
+            name=f"{s['name']} ({drone_type})", hoverinfo='name'))
 
-    # Calculate default zoom bounds based on the data points
+    for s in active_resp_data:
+        plot_ring(s, 2.0, "Responder")
+        
+    for s in active_guard_data:
+        plot_ring(s, 8.0, "Guardian")
+
     data_points = calls_in_city.to_crs(epsg=4326)
     if not data_points.empty:
         q_low = data_points.geometry.x.quantile(0.01)
@@ -523,38 +522,41 @@ if call_data and station_data:
         min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
         max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
         dynamic_zoom = calculate_zoom(min_lon, max_lon)
-        center_lat, center_lon = (min_lat + max_lat)/2, (min_lon + max_lon)/2
     else:
-        dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
+        dynamic_zoom = 12
 
-    # Explicitly lock the uirevision to a constant string.
-    # Because uirevision is constant, Plotly will ALWAYS favor your pan and zoom over the explicit dynamic_zoom below!
+    # --- THE ZOOM/PAN PRESERVATION FIX ---
+    # Tie the layout state purely to the underlying physical data center
+    data_signature = f"LOCKED_{center_lat:.4f}_{center_lon:.4f}"
+
+    map_config = dict(
+        uirevision=data_signature,
+        center=dict(lat=center_lat, lon=center_lon),
+        zoom=dynamic_zoom,
+        style="white-bg" if show_satellite else "open-street-map"
+    )
+    
+    if show_satellite:
+        map_config["layers"] = [
+            {
+                "below": 'traces',
+                "sourcetype": "raster",
+                "sourceattribution": "Esri, Maxar, Earthstar Geographics",
+                "source": [
+                    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                ]
+            }
+        ]
+
+    # Explicitly pass the uirevision configuration. 
+    # Because uirevision does not change on slider clicks, Plotly will ignore the code's zoom state and KEEP yours!
     fig.update_layout(
-        uirevision="LOCKED_MAP_MEMORY",
-        map=dict(
-            uirevision="LOCKED_MAP_MEMORY",
-            style="white-bg" if show_satellite else "open-street-map",
-            zoom=dynamic_zoom,
-            center=dict(lat=center_lat, lon=center_lon)
-        ),
+        uirevision=data_signature,
+        map=map_config,
         margin={"r":0,"t":0,"l":0,"b":0}, 
         height=800,
         font=dict(size=18)
     )
-
-    if show_satellite:
-        fig.update_layout(
-            map_layers=[
-                {
-                    "below": 'traces',
-                    "sourcetype": "raster",
-                    "sourceattribution": "Esri, Maxar, Earthstar Geographics",
-                    "source": [
-                        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                    ]
-                }
-            ]
-        )
 
     st.plotly_chart(fig, use_container_width=True)
 
