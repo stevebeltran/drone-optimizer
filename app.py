@@ -488,8 +488,8 @@ if call_data and station_data:
         zoom_lat = np.log2(180 / lat_diff)
         
         # Pick the smaller zoom (most zoomed out) so the whole shape fits
-        # Subtract 0.8 to give the map a nice visual padding/margin
-        best_zoom = min(zoom_lon, zoom_lat) - 0.8
+        # We ADD 0.2 here to zoom in 200% tighter than the previous baseline
+        best_zoom = min(zoom_lon, zoom_lat) + 0.2
         
         # Clamp it to reasonable Mapbox limits so it never breaks
         return min(max(best_zoom, 5), 18)
