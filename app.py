@@ -93,7 +93,6 @@ def get_circle_coords(lat, lon, r_mi=2.0):
 def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_names, calls_gdf):
     kml = simplekml.Kml()
     
-    # 1. Add Boundaries
     fol_bounds = kml.newfolder(name="Jurisdictions")
     for _, row in active_gdf.iterrows():
         geoms = [row.geometry] if isinstance(row.geometry, Polygon) else row.geometry.geoms
@@ -104,7 +103,6 @@ def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_na
             pol.style.linestyle.width = 3
             pol.style.polystyle.color = simplekml.Color.changealphaint(30, simplekml.Color.red)
 
-    # 2. Add Active Stations & RINGS
     fol_stations = kml.newfolder(name="Stations Points")
     fol_rings = kml.newfolder(name="Coverage Rings")
 
@@ -127,7 +125,6 @@ def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_na
     for _, row in df_stations_all[df_stations_all['name'].isin(active_guard_names)].iterrows():
         add_kml_station(row, 8.0, simplekml.Color.orange, "[Guardian]")
 
-    # 3. Add Sample of Calls
     fol_calls = kml.newfolder(name="Incident Data (Sample)")
     calls_export = calls_gdf.to_crs(epsg=4326)
     if len(calls_export) > 2000:
@@ -478,66 +475,76 @@ if call_data and station_data:
         zoom = 10.5 - np.log(width)
         return min(max(zoom, 10), 15)
 
-    def add_boundary_to_map(geom):
-        if geom is None or geom.is_empty: return
-        if isinstance(geom, Polygon):
-            bx, by = geom.exterior.coords.xy
-            fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
-        elif isinstance(geom, MultiPolygon):
-            for poly in geom.geoms:
-                bx, by = poly.exterior.coords.xy
-                fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
-
+    # Add Boundaries using SCATTERMAPBOX
     if show_boundaries:
-        add_boundary_to_map(city_boundary_geom)
-        
+        if city_boundary_geom is not None and not city_boundary_geom.is_empty:
+            if isinstance(city_boundary_geom, Polygon):
+                bx, by = city_boundary_geom.exterior.coords.xy
+                fig.add_trace(go.Scattermapbox(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip'))
+            elif isinstance(city_boundary_geom, MultiPolygon):
+                for poly in city_boundary_geom.geoms:
+                    bx, by = poly.exterior.coords.xy
+                    fig.add_trace(go.Scattermapbox(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
+
+    # Add Incidents using SCATTERMAPBOX
     if not calls_in_city.empty:
-        # random_state ensures the sample dots don't bounce around, preserving map memory!
         display_calls = calls_in_city.sample(min(5000, total_calls), random_state=42).to_crs(epsg=4326)
-        fig.add_trace(go.Scattermap(lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
+        fig.add_trace(go.Scattermapbox(
+            lat=display_calls.geometry.y, 
+            lon=display_calls.geometry.x, 
+            mode='markers', 
+            marker=dict(size=4, color='#000080', opacity=0.35), 
+            name="Incident Data", 
+            hoverinfo='skip'
+        ))
 
-    all_names = df_stations_all['name'].tolist()
+    # Add Drone Rings using SCATTERMAPBOX
+    for i, row in df_stations_all.iterrows():
+        s_name = row['name']
+        color = STATION_COLORS[i % len(STATION_COLORS)]
 
-    def plot_ring(s, radius_mi, drone_type):
-        color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
-        clats, clons = get_circle_coords(s['lat'], s['lon'], r_mi=radius_mi)
-        fig.add_trace(go.Scattermap(
-            lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
-            mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
-            line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
-            name=f"{s['name']} ({drone_type})", hoverinfo='name'))
+        if s_name in active_resp_names:
+            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=2.0)
+            lbl = f"{s_name} (Responder)"
+        elif s_name in active_guard_names:
+            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=8.0)
+            lbl = f"{s_name} (Guardian)"
+        else:
+            continue
 
-    for s in active_resp_data:
-        plot_ring(s, 2.0, "Responder")
-        
-    for s in active_guard_data:
-        plot_ring(s, 8.0, "Guardian")
+        fig.add_trace(go.Scattermapbox(
+            lat=list(clats) + [None, row['lat']], 
+            lon=list(clons) + [None, row['lon']], 
+            mode='lines+markers', 
+            marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
+            line=dict(color=color, width=4.5), 
+            fill='toself', 
+            fillcolor='rgba(0,0,0,0)', 
+            name=lbl, 
+            hoverinfo='name'
+        ))
 
-    data_points = calls_in_city.to_crs(epsg=4326)
-    if not data_points.empty:
-        q_low = data_points.geometry.x.quantile(0.01)
-        q_high = data_points.geometry.x.quantile(0.99)
-        clean_pts = data_points[(data_points.geometry.x >= q_low) & (data_points.geometry.x <= q_high)]
-        if clean_pts.empty: clean_pts = data_points
+    if not calls_in_city.empty:
+        q_low = calls_in_city.geometry.x.quantile(0.01)
+        q_high = calls_in_city.geometry.x.quantile(0.99)
+        clean_pts = calls_in_city[(calls_in_city.geometry.x >= q_low) & (calls_in_city.geometry.x <= q_high)]
+        if clean_pts.empty: clean_pts = calls_in_city
         min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
         max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
         dynamic_zoom = calculate_zoom(min_lon, max_lon)
     else:
         dynamic_zoom = 12
 
-    # --- THE ZOOM/PAN PRESERVATION FIX ---
-    # Tie the layout state purely to the underlying physical data center
-    data_signature = f"LOCKED_{center_lat:.4f}_{center_lon:.4f}"
-
-    map_config = dict(
-        uirevision=data_signature,
+    # Mapbox configuration Dictionary
+    mapbox_config = dict(
         center=dict(lat=center_lat, lon=center_lon),
         zoom=dynamic_zoom,
         style="white-bg" if show_satellite else "open-street-map"
     )
     
+    # Inject Esri Satellite Layer if toggled
     if show_satellite:
-        map_config["layers"] = [
+        mapbox_config["layers"] = [
             {
                 "below": 'traces',
                 "sourcetype": "raster",
@@ -548,11 +555,10 @@ if call_data and station_data:
             }
         ]
 
-    # Explicitly pass the uirevision configuration. 
-    # Because uirevision does not change on slider clicks, Plotly will ignore the code's zoom state and KEEP yours!
+    # Explicitly lock the uirevision to a constant string on the layout update
     fig.update_layout(
-        uirevision=data_signature,
-        map=map_config,
+        uirevision="LOCKED_MAP_MEMORY",
+        mapbox=mapbox_config,
         margin={"r":0,"t":0,"l":0,"b":0}, 
         height=800,
         font=dict(size=18)
