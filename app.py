@@ -23,7 +23,7 @@ except FileNotFoundError:
     # If the logo isn't found, we just show a text placeholder or nothing
     pass
 
-st.title("🛰️ brinc COS Drone Optimizer")
+st.title("🛰️ BRINC COS Drone Optimizer")
 
 # --- CONFIGURATION ---
 SHAPEFILE_DIR = "jurisdiction_data" 
@@ -490,5 +490,6 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
 
 
