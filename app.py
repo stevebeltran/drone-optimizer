@@ -515,38 +515,48 @@ if call_data and station_data:
     else:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
-    # Determine Base Map based on Toggle
-    if show_satellite:
-        fig.update_layout(
-            uirevision="constant",
-            map_style="white-bg", 
-            map_layers=[
-                {
-                    "below": 'traces',
-                    "sourcetype": "raster",
-                    "sourceattribution": "Esri, Maxar, Earthstar Geographics",
-                    "source": [
-                        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                    ]
-                }
-            ],
-            map_zoom=dynamic_zoom, 
-            map_center={"lat": center_lat, "lon": center_lon}, 
-            margin={"r":0,"t":0,"l":0,"b":0}, 
-            height=800,
-            font=dict(size=18)
-        )
-    else:
-        fig.update_layout(
-            uirevision="constant",
-            map_style="open-street-map", 
-            map_zoom=dynamic_zoom, 
-            map_center={"lat": center_lat, "lon": center_lon}, 
-            margin={"r":0,"t":0,"l":0,"b":0}, 
-            height=800,
-            font=dict(size=18)
-        )
+    # --- THE ZOOM/PAN PRESERVATION FIX ---
+    # 1. Start building layout with "uirevision" to lock the UI state
+    layout_kwargs = {
+        "uirevision": "constant",
+        "margin": {"r":0,"t":0,"l":0,"b":0}, 
+        "height": 800,
+        "font": dict(size=18)
+    }
 
+    # 2. Add satellite layers if toggled
+    if show_satellite:
+        layout_kwargs["map_style"] = "white-bg"
+        layout_kwargs["map_layers"] = [
+            {
+                "below": 'traces',
+                "sourcetype": "raster",
+                "sourceattribution": "Esri, Maxar, Earthstar Geographics",
+                "source": [
+                    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                ]
+            }
+        ]
+    else:
+        layout_kwargs["map_style"] = "open-street-map"
+
+    # 3. Create a unique fingerprint for the current uploaded dataset
+    data_signature = f"{len(calls_in_city)}_{center_lat:.4f}"
+    
+    # 4. If this is the FIRST time seeing this dataset, tell Plotly to recenter
+    if st.session_state.get("map_signature") != data_signature:
+        st.session_state["map_signature"] = data_signature
+        st.session_state["force_recenter"] = True
+
+    # 5. ONLY pass the explicit map_zoom and map_center on that very first run.
+    # By omitting these on future runs (like slider interactions), Plotly won't snap back!
+    if st.session_state.get("force_recenter"):
+        layout_kwargs["map_zoom"] = dynamic_zoom
+        layout_kwargs["map_center"] = {"lat": center_lat, "lon": center_lon}
+        st.session_state["force_recenter"] = False
+
+    fig.update_layout(**layout_kwargs)
+    
     st.plotly_chart(fig, use_container_width=True)
 
 else:
