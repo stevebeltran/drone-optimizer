@@ -14,6 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="brinc COS Drone Optimizer", layout="wide")
+# --- MAP STATE MEMORY ---
+if "map_state" not in st.session_state:
+    st.session_state.map_state = {
+        "center_lat": None,
+        "center_lon": None,
+        "zoom": None
+    }
 
 # --- CUSTOM CSS FOR FONT SIZES ---
 st.markdown(
@@ -524,30 +531,49 @@ if call_data and station_data:
             hoverinfo='name'
         ))
 
-    # CALCULATE ZOOM & CENTER BASED ON JURISDICTION BOUNDARY
-    if city_boundary_geom is not None and not city_boundary_geom.is_empty:
-        min_lon, min_lat, max_lon, max_lat = city_boundary_geom.bounds
-        center_lon = (min_lon + max_lon) / 2
-        center_lat = (min_lat + max_lat) / 2
-        dynamic_zoom = calculate_zoom(min_lon, max_lon)
-    elif not calls_in_city.empty:
-        q_low = calls_in_city.geometry.x.quantile(0.01)
-        q_high = calls_in_city.geometry.x.quantile(0.99)
-        clean_pts = calls_in_city[(calls_in_city.geometry.x >= q_low) & (calls_in_city.geometry.x <= q_high)]
-        if clean_pts.empty: clean_pts = calls_in_city
-        min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
-        max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
-        center_lon = (min_lon + max_lon) / 2
-        center_lat = (min_lat + max_lat) / 2
-        dynamic_zoom = calculate_zoom(min_lon, max_lon)
-    else:
-        dynamic_zoom = 12
+    # --- CALCULATE DEFAULT MAP VIEW ---
+if city_boundary_geom is not None and not city_boundary_geom.is_empty:
+    min_lon, min_lat, max_lon, max_lat = city_boundary_geom.bounds
+    default_center_lon = (min_lon + max_lon) / 2
+    default_center_lat = (min_lat + max_lat) / 2
+    default_zoom = calculate_zoom(min_lon, max_lon)
+
+elif not calls_in_city.empty:
+    q_low = calls_in_city.geometry.x.quantile(0.01)
+    q_high = calls_in_city.geometry.x.quantile(0.99)
+    clean_pts = calls_in_city[(calls_in_city.geometry.x >= q_low) & (calls_in_city.geometry.x <= q_high)]
+    if clean_pts.empty:
+        clean_pts = calls_in_city
+
+    min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
+    max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
+
+    default_center_lon = (min_lon + max_lon) / 2
+    default_center_lat = (min_lat + max_lat) / 2
+    default_zoom = calculate_zoom(min_lon, max_lon)
+
+else:
+    default_center_lat = 39
+    default_center_lon = -96
+    default_zoom = 4
+
+
+# --- STORE INITIAL VIEW ONLY ON FIRST RUN ---
+if st.session_state.map_state["center_lat"] is None:
+    st.session_state.map_state["center_lat"] = default_center_lat
+    st.session_state.map_state["center_lon"] = default_center_lon
+    st.session_state.map_state["zoom"] = default_zoom
+
+
+center_lat = st.session_state.map_state["center_lat"]
+center_lon = st.session_state.map_state["center_lon"]
+dynamic_zoom = st.session_state.map_state["zoom"]
 
     # --- THE ZOOM/PAN PRESERVATION FIX ---
     # Tie the layout state purely to the underlying physical data center
     # This automatically resets your zoom if you pick a new jurisdiction, 
     # but strictly locks your pan/zoom if you are just moving sliders!
-    data_signature = f"LOCKED_{center_lat:.4f}_{center_lon:.4f}"
+  data_signature = "MAP_LOCK"
 
     # Mapbox configuration Dictionary
     mapbox_config = dict(
@@ -584,3 +610,4 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
