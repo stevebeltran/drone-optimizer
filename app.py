@@ -543,6 +543,7 @@ if call_data and station_data:
             radius=12,
             colorscale='Inferno',
             opacity=0.6,
+            showscale=False,
             name="Heatmap",
             hoverinfo='skip'
         ))
