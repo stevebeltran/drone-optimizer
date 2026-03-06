@@ -4,6 +4,7 @@ import geopandas as gpd
 import numpy as np
 import plotly.graph_objects as go
 from shapely.geometry import Point, Polygon, MultiPolygon, box
+import shapely.wkt
 from shapely.ops import unary_union
 import os
 import itertools
@@ -204,6 +205,69 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
     
     return master_gdf
 
+
+# --- PERFORMANCE BOOSTER: CACHED SPATIAL MATH ---
+@st.cache_resource
+def precompute_spatial_data(df_calls, df_stations_all, city_m_wkt, epsg_code):
+    """
+    By wrapping this in st.cache_resource, Streamlit will lock this heavy geometry
+    math in memory. Sliders and map renders will be instant after the first load.
+    """
+    city_m = shapely.wkt.loads(city_m_wkt)
+    
+    gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
+    gdf_calls_utm = gdf_calls.to_crs(epsg=epsg_code)
+    
+    try:
+        calls_in_city = gdf_calls_utm[gdf_calls_utm.within(city_m)]
+    except:
+        calls_in_city = gdf_calls_utm
+        
+    radius_resp_m = 3218.69   # 2 Miles
+    radius_guard_m = 12874.75 # 8 Miles
+    
+    station_metadata = []
+    total_calls = len(calls_in_city)
+    n = len(df_stations_all)
+    
+    resp_matrix = np.zeros((n, total_calls), dtype=bool)
+    guard_matrix = np.zeros((n, total_calls), dtype=bool)
+    
+    # Also pre-project the display calls back to lat/lon so the map draws instantly
+    if not calls_in_city.empty:
+        display_calls = calls_in_city.sample(min(5000, total_calls), random_state=42).to_crs(epsg=4326)
+    else:
+        display_calls = gpd.GeoDataFrame()
+    
+    if not calls_in_city.empty:
+        calls_array = np.array(list(zip(calls_in_city.geometry.x, calls_in_city.geometry.y)))
+        
+        for i, row in df_stations_all.iterrows():
+            s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
+            
+            # Fast vectorized distance math
+            dists = np.sqrt((calls_array[:,0] - s_pt_m.x)**2 + (calls_array[:,1] - s_pt_m.y)**2)
+            
+            resp_matrix[i, :] = dists <= radius_resp_m
+            guard_matrix[i, :] = dists <= radius_guard_m
+
+            # Geometric profiles for Map drawing and Land coverage
+            full_buf_2m = s_pt_m.buffer(radius_resp_m)
+            try: clipped_2m = full_buf_2m.intersection(city_m)
+            except: clipped_2m = full_buf_2m
+
+            full_buf_8m = s_pt_m.buffer(radius_guard_m)
+            try: clipped_8m = full_buf_8m.intersection(city_m)
+            except: clipped_8m = full_buf_8m
+                
+            station_metadata.append({
+                'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
+                'clipped_2m': clipped_2m, 'clipped_8m': clipped_8m
+            })
+            
+    return calls_in_city, display_calls, resp_matrix, guard_matrix, station_metadata, total_calls
+
+
 # --- FILE ROUTING ---
 call_data, station_data = None, None
 if uploaded_files:
@@ -275,51 +339,13 @@ if call_data and station_data:
         st.error(f"Geometry Error: {e}")
         st.stop()
 
-    gdf_calls = gpd.GeoDataFrame(df_calls, geometry=gpd.points_from_xy(df_calls.lon, df_calls.lat), crs="EPSG:4326")
-    gdf_calls_utm = gdf_calls.to_crs(epsg=epsg_code)
-    
-    try:
-        calls_in_city = gdf_calls_utm[gdf_calls_utm.within(city_m)]
-    except:
-        calls_in_city = gdf_calls_utm
-        
-    # --- PRE-CALC DUAL PROFILES (USING FAST NUMPY ARRAYS) ---
-    radius_resp_m = 3218.69   # 2 Miles
-    radius_guard_m = 12874.75 # 8 Miles
-    
-    station_metadata = []
-    total_calls = len(calls_in_city)
+    # --- TRIGGER THE CACHED HEAVY LIFTING ---
+    with st.spinner("⚡ Precomputing spatial optimization matrices..."):
+        city_m_wkt = city_m.wkt  # Convert geometry to string so Streamlit can hash it easily
+        calls_in_city, display_calls, resp_matrix, guard_matrix, station_metadata, total_calls = precompute_spatial_data(
+            df_calls, df_stations_all, city_m_wkt, epsg_code
+        )
     n = len(df_stations_all)
-    
-    resp_matrix = np.zeros((n, total_calls), dtype=bool)
-    guard_matrix = np.zeros((n, total_calls), dtype=bool)
-    
-    if not calls_in_city.empty:
-        # Convert map coordinates to a numpy array for blazing fast calculations
-        calls_array = np.array(list(zip(calls_in_city.geometry.x, calls_in_city.geometry.y)))
-        
-        for i, row in df_stations_all.iterrows():
-            s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
-            
-            # Fast vectorized distance math
-            dists = np.sqrt((calls_array[:,0] - s_pt_m.x)**2 + (calls_array[:,1] - s_pt_m.y)**2)
-            
-            resp_matrix[i, :] = dists <= radius_resp_m
-            guard_matrix[i, :] = dists <= radius_guard_m
-
-            # Geometric profiles for Map drawing and Land coverage
-            full_buf_2m = s_pt_m.buffer(radius_resp_m)
-            try: clipped_2m = full_buf_2m.intersection(city_m)
-            except: clipped_2m = full_buf_2m
-
-            full_buf_8m = s_pt_m.buffer(radius_guard_m)
-            try: clipped_8m = full_buf_8m.intersection(city_m)
-            except: clipped_8m = full_buf_8m
-                
-            station_metadata.append({
-                'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
-                'clipped_2m': clipped_2m, 'clipped_8m': clipped_8m
-            })
 
     # --- OPTIMIZER CONTROLS ---
     st.sidebar.header("🎯 Optimizer Controls")
@@ -489,7 +515,7 @@ if call_data and station_data:
         
         # Pick the smaller zoom (most zoomed out) so the whole shape fits
         # We ADD 1.6 here to zoom in exactly 300% tighter than the baseline
-        best_zoom = min(zoom_lon, zoom_lat) + 1.5
+        best_zoom = min(zoom_lon, zoom_lat) + 1.6
         
         # Clamp it to reasonable Mapbox limits so it never breaks
         return min(max(best_zoom, 5), 18)
@@ -506,8 +532,7 @@ if call_data and station_data:
                     fig.add_trace(go.Scattermapbox(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#222", width=3), name="Jurisdiction Boundary", hoverinfo='skip', showlegend=False))
 
     # Add Incidents using SCATTERMAPBOX
-    if not calls_in_city.empty:
-        display_calls = calls_in_city.sample(min(5000, total_calls), random_state=42).to_crs(epsg=4326)
+    if not display_calls.empty:
         fig.add_trace(go.Scattermapbox(
             lat=display_calls.geometry.y, 
             lon=display_calls.geometry.x, 
@@ -582,4 +607,3 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
-
