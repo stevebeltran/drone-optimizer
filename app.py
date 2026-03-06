@@ -489,7 +489,7 @@ if call_data and station_data:
         
         # Pick the smaller zoom (most zoomed out) so the whole shape fits
         # We ADD 1.6 here to zoom in exactly 300% tighter than the baseline
-        best_zoom = min(zoom_lon, zoom_lat) + 1.6
+        best_zoom = min(zoom_lon, zoom_lat) + 1.5
         
         # Clamp it to reasonable Mapbox limits so it never breaks
         return min(max(best_zoom, 5), 18)
@@ -582,3 +582,4 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
