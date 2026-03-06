@@ -507,11 +507,14 @@ if call_data and station_data:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
     # --- THE ZOOM/PAN PRESERVATION FIX ---
+    # Tie the layout state purely to the underlying data locations
     data_signature = f"{len(calls_in_city)}_{center_lat:.4f}_{center_lon:.4f}"
 
     map_config = {
         "uirevision": data_signature,
-        "style": "white-bg" if show_satellite else "open-street-map"
+        "style": "white-bg" if show_satellite else "open-street-map",
+        "zoom": dynamic_zoom,
+        "center": {"lat": center_lat, "lon": center_lon}
     }
     
     if show_satellite:
@@ -526,13 +529,8 @@ if call_data and station_data:
             }
         ]
 
-    # MAGIC FIX: We check if the dataset is brand new. If it is new, we add the zoom and center to the config. 
-    # If it is NOT new (you just touched a slider), we leave zoom and center completely out of the config so Plotly preserves your position!
-    if st.session_state.get("current_map_data") != data_signature:
-        st.session_state["current_map_data"] = data_signature
-        map_config["zoom"] = dynamic_zoom
-        map_config["center"] = {"lat": center_lat, "lon": center_lon}
-
+    # Set uirevision at the top level and pass explicit zoom/center instructions. 
+    # Because uirevision does not change on slider clicks, Plotly will ignore the explicit zoom and keep yours!
     fig.update_layout(
         uirevision=data_signature,
         map=map_config,
