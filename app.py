@@ -45,15 +45,15 @@ STATION_COLORS = [
     "#800000", "#333333", "#000075", "#808000", "#9A6324"
 ]
 
-def get_circle_coords(lat, lon, r_mi=2):
+def get_circle_coords(lat, lon, r_mi=2.0):
     """Generates Lat/Lon coordinates for a circle."""
     angles = np.linspace(0, 2*np.pi, 100)
     c_lats = lat + (r_mi/69.172) * np.sin(angles)
     c_lons = lon + (r_mi/(69.172 * np.cos(np.radians(lat)))) * np.cos(angles)
     return c_lats, c_lons
 
-# --- KML EXPORT FUNCTION (FIXED: ADDS RINGS) ---
-def generate_kml(active_gdf, active_stations_df, calls_gdf):
+# --- KML EXPORT FUNCTION (UPDATED FOR DUAL FLEET) ---
+def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_names, calls_gdf):
     kml = simplekml.Kml()
     
     # 1. Add Boundaries
@@ -69,32 +69,30 @@ def generate_kml(active_gdf, active_stations_df, calls_gdf):
 
     # 2. Add Active Stations & RINGS
     fol_stations = kml.newfolder(name="Stations Points")
-    fol_rings = kml.newfolder(name="Coverage Rings") # New Layer for Rings
+    fol_rings = kml.newfolder(name="Coverage Rings")
 
-    for _, row in active_stations_df.iterrows():
-        # A. Add the Point (Pushpin)
-        pnt = fol_stations.newpoint(name=row['name'])
+    def add_kml_station(row, radius, color, name_prefix):
+        # Point
+        pnt = fol_stations.newpoint(name=f"{name_prefix} {row['name']}")
         pnt.coords = [(row['lon'], row['lat'])]
-        # Use a standard Google Earth paddle icon
         pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/paddle/blu-blank.png'
-
-        # B. Add the Ring (Polygon)
-        # Calculate circle coords (using 2 miles, same as optimizer)
-        lats, lons = get_circle_coords(row['lat'], row['lon'], r_mi=2)
-        
-        # Zip lons/lats into (lon, lat) tuples for KML
+        # Ring
+        lats, lons = get_circle_coords(row['lat'], row['lon'], r_mi=radius)
         ring_coords = list(zip(lons, lats))
-        # Close the polygon loop
         ring_coords.append(ring_coords[0])
-        
-        # Create the polygon in KML
         pol = fol_rings.newpolygon(name=f"Range: {row['name']}")
         pol.outerboundaryis = ring_coords
-        
-        # Style: Blue Outline, Semi-Transparent Blue Fill
-        pol.style.linestyle.color = simplekml.Color.blue
+        pol.style.linestyle.color = color
         pol.style.linestyle.width = 2
-        pol.style.polystyle.color = simplekml.Color.changealphaint(60, simplekml.Color.blue)
+        pol.style.polystyle.color = simplekml.Color.changealphaint(60, color)
+
+    # Add Responders (Blue, 2-Mile)
+    for _, row in df_stations_all[df_stations_all['name'].isin(active_resp_names)].iterrows():
+        add_kml_station(row, 2.0, simplekml.Color.blue, "[Responder]")
+        
+    # Add Guardians (Orange, 8-Mile)
+    for _, row in df_stations_all[df_stations_all['name'].isin(active_guard_names)].iterrows():
+        add_kml_station(row, 8.0, simplekml.Color.orange, "[Guardian]")
 
     # 3. Add Sample of Calls
     fol_calls = kml.newfolder(name="Incident Data (Sample)")
@@ -258,87 +256,125 @@ if call_data and station_data:
         
     calls_in_city['point_idx'] = range(len(calls_in_city))
     
-    radius_m = 3218.69 
+    # --- PRE-CALC DUAL PROFILES ---
+    radius_resp_m = 3218.69   # 2 Miles
+    radius_guard_m = 12874.75 # 8 Miles
+    
     station_metadata = []
     
     if not calls_in_city.empty:
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
-            mask = calls_in_city.geometry.distance(s_pt_m) <= radius_m
-            covered_indices = set(calls_in_city[mask]['point_idx'])
             
-            full_buf = s_pt_m.buffer(radius_m)
-            try:
-                clipped_buf = full_buf.intersection(city_m)
-            except:
-                clipped_buf = full_buf
+            # Responder Profile (2-Mile)
+            mask_2m = calls_in_city.geometry.distance(s_pt_m) <= radius_resp_m
+            indices_2m = set(calls_in_city[mask_2m]['point_idx'])
+            full_buf_2m = s_pt_m.buffer(radius_resp_m)
+            try: clipped_2m = full_buf_2m.intersection(city_m)
+            except: clipped_2m = full_buf_2m
+
+            # Guardian Profile (8-Mile)
+            mask_8m = calls_in_city.geometry.distance(s_pt_m) <= radius_guard_m
+            indices_8m = set(calls_in_city[mask_8m]['point_idx'])
+            full_buf_8m = s_pt_m.buffer(radius_guard_m)
+            try: clipped_8m = full_buf_8m.intersection(city_m)
+            except: clipped_8m = full_buf_8m
                 
             station_metadata.append({
                 'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
-                'clipped_m': clipped_buf, 'indices': covered_indices, 'count': len(covered_indices)
+                'clipped_2m': clipped_2m, 'indices_2m': indices_2m,
+                'clipped_8m': clipped_8m, 'indices_8m': indices_8m
             })
 
+    # --- OPTIMIZER CONTROLS ---
     st.sidebar.header("🎯 Optimizer Controls")
     opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
     
-    max_k = len(station_metadata) if station_metadata else 1
-    k = st.sidebar.slider("Number of Stations to Deploy", 1, max_k, min(2, max_k) if max_k > 1 else 1)
+    n = len(station_metadata)
+    k_responder = st.sidebar.slider("🚁 Responder Drones (2-Mile)", 0, n, min(1, n))
+    k_guardian = st.sidebar.slider("🦅 Guardian Drones (8-Mile)", 0, n, 0)
     
     show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
     
-    n = len(station_metadata)
-    total_possible = math.comb(n, k)
+    best_resp_names, best_guard_names = [], []
     
-    combos = []
-    if total_possible > 3000:
-        st.toast(f"Optimization Mode: Sampling ({total_possible:,} options)")
-        for _ in range(3000):
-            combos.append(np.random.choice(range(n), k, replace=False))
-    else:
-        combos = list(itertools.combinations(range(n), k))
-    
-    best_names = []
-    max_val = -1
-    
-    with st.spinner(f"Optimizing..."):
-        for combo in combos:
-            if opt_strategy == "Maximize Call Coverage":
-                union_set = set().union(*(station_metadata[i]['indices'] for i in combo))
-                val = len(union_set)
-            else:
-                union_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
-                val = union_geo.area
-            
-            if val > max_val:
-                max_val = val
-                best_combo = combo
+    if k_responder + k_guardian > n:
+        st.error("⚠️ Over-Deployment: Total requested drones exceed available stations.")
+    elif k_responder > 0 or k_guardian > 0:
         
-        if best_combo is not None:
-            best_names = [station_metadata[i]['name'] for i in best_combo]
+        # Calculate possible combinations
+        total_resp_combos = math.comb(n, k_responder)
+        total_guard_combos = math.comb(n - k_responder, k_guardian) if n >= k_responder else 0
+        total_possible = total_resp_combos * total_guard_combos
+        
+        combos = []
+        if total_possible > 3000:
+            st.toast(f"Optimization Mode: Sampling ({total_possible:,} options)")
+            for _ in range(3000):
+                chosen = np.random.choice(range(n), k_responder + k_guardian, replace=False)
+                r_c = tuple(chosen[:k_responder])
+                g_c = tuple(chosen[k_responder:])
+                combos.append((r_c, g_c))
+        else:
+            stations_idx = list(range(n))
+            for r_c in itertools.combinations(stations_idx, k_responder):
+                rem = [x for x in stations_idx if x not in r_c]
+                for g_c in itertools.combinations(rem, k_guardian):
+                    combos.append((r_c, g_c))
+        
+        max_val = -1
+        best_combo = None
+        
+        with st.spinner(f"Optimizing {len(combos)} configurations..."):
+            for r_combo, g_combo in combos:
+                if opt_strategy == "Maximize Call Coverage":
+                    union_set = set().union(*(station_metadata[i]['indices_2m'] for i in r_combo), 
+                                            *(station_metadata[i]['indices_8m'] for i in g_combo))
+                    val = len(union_set)
+                else:
+                    union_geo = unary_union([station_metadata[i]['clipped_2m'] for i in r_combo] + 
+                                            [station_metadata[i]['clipped_8m'] for i in g_combo])
+                    val = union_geo.area
+                
+                if val > max_val:
+                    max_val = val
+                    best_combo = (r_combo, g_combo)
+            
+            if best_combo is not None:
+                r_best, g_best = best_combo
+                best_resp_names = [station_metadata[i]['name'] for i in r_best]
+                best_guard_names = [station_metadata[i]['name'] for i in g_best]
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🏆 Recommended Deployment")
-    for name in best_names: st.sidebar.write(f"✅ {name}")
+    for name in best_resp_names: st.sidebar.write(f"🚁 {name} (Responder)")
+    for name in best_guard_names: st.sidebar.write(f"🦅 {name} (Guardian)")
     
-    active_names = ctrl_col2.multiselect("📡 Active Deployment", options=df_stations_all['name'].tolist(), default=best_names)
+    # --- UI SELECTION ---
+    active_resp_names = ctrl_col2.multiselect("🚁 Active Responders (2-Mile)", options=df_stations_all['name'].tolist(), default=best_resp_names)
+    active_guard_names = ctrl_col2.multiselect("🦅 Active Guardians (8-Mile)", options=df_stations_all['name'].tolist(), default=best_guard_names)
     
+    # --- METRICS CALCULATION ---
     area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
-    if active_names and station_metadata:
-        active_data = [s for s in station_metadata if s['name'] in active_names]
-        active_buffers = [s['clipped_m'] for s in active_data]
-        active_indices = [s['indices'] for s in active_data]
-        
+    
+    active_resp_data = [s for s in station_metadata if s['name'] in active_resp_names]
+    active_guard_data = [s for s in station_metadata if s['name'] in active_guard_names]
+    
+    active_geos = [s['clipped_2m'] for s in active_resp_data] + [s['clipped_8m'] for s in active_guard_data]
+    active_indices = [s['indices_2m'] for s in active_resp_data] + [s['indices_8m'] for s in active_guard_data]
+
+    if active_geos:
         if not city_m.is_empty:
-            area_covered_perc = (unary_union(active_buffers).area / city_m.area) * 100
+            area_covered_perc = (unary_union(active_geos).area / city_m.area) * 100
         
         if len(calls_in_city) > 0:
             calls_covered_perc = (len(set().union(*active_indices)) / len(calls_in_city)) * 100
         
         inters = []
-        for i in range(len(active_buffers)):
-            for j in range(i+1, len(active_buffers)):
-                over = active_buffers[i].intersection(active_buffers[j])
+        for i in range(len(active_geos)):
+            for j in range(i+1, len(active_geos)):
+                over = active_geos[i].intersection(active_geos[j])
                 if not over.is_empty: inters.append(over)
         if not city_m.is_empty:
             overlap_perc = (unary_union(inters).area / city_m.area * 100) if inters else 0.0
@@ -350,7 +386,7 @@ if call_data and station_data:
         if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
         elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
         elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
-        else: h_color, h_label = "#dc3545", "CRITICAL"
+        else: h_color, h_label = "#dc3545", "FUNDAMENTAL"
         
         st.markdown(f"""
             <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
@@ -367,7 +403,9 @@ if call_data and station_data:
     # --- KML EXPORT ---
     kml_data = generate_kml(
         active_gdf, 
-        df_stations_all[df_stations_all['name'].isin(active_names)], 
+        df_stations_all, 
+        active_resp_names,
+        active_guard_names,
         calls_in_city
     )
     
@@ -379,6 +417,7 @@ if call_data and station_data:
         mime="application/vnd.google-earth.kml+xml"
     )
 
+    # --- MAP RENDERING ---
     fig = go.Figure()
     
     def calculate_zoom(min_lon, max_lon):
@@ -405,15 +444,23 @@ if call_data and station_data:
         fig.add_trace(go.Scattermap(lat=display_calls.geometry.y, lon=display_calls.geometry.x, mode='markers', marker=dict(size=4, color='#000080', opacity=0.35), name="Incident Data", hoverinfo='skip'))
 
     all_names = df_stations_all['name'].tolist()
-    for i, s in enumerate(station_metadata):
-        if s['name'] in active_names:
-            color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
-            clats, clons = get_circle_coords(s['lat'], s['lon'])
-            fig.add_trace(go.Scattermap(
-                lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
-                mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
-                line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
-                name=f"{s['name']}", hoverinfo='name'))
+
+    def plot_ring(s, radius_mi, drone_type):
+        color = STATION_COLORS[all_names.index(s['name']) % len(STATION_COLORS)]
+        clats, clons = get_circle_coords(s['lat'], s['lon'], r_mi=radius_mi)
+        fig.add_trace(go.Scattermap(
+            lat=list(clats) + [None, s['lat']], lon=list(clons) + [None, s['lon']], 
+            mode='lines+markers', marker=dict(size=[0]*len(clats) + [0, 20], color=color), 
+            line=dict(color=color, width=4.5), fill='toself', fillcolor='rgba(0,0,0,0)', 
+            name=f"{s['name']} ({drone_type})", hoverinfo='name'))
+
+    # Plot Responders
+    for s in active_resp_data:
+        plot_ring(s, 2.0, "Responder")
+        
+    # Plot Guardians
+    for s in active_guard_data:
+        plot_ring(s, 8.0, "Guardian")
 
     data_points = calls_in_city.to_crs(epsg=4326)
     if not data_points.empty:
