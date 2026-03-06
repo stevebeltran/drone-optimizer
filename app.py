@@ -396,7 +396,7 @@ if call_data and station_data:
         if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
         elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
         elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
-        else: h_color, h_label = "#dc3545", "CRITICAL"
+        else: h_color, h_label = "#dc3545", "ESSENTIAL"
         
         st.markdown(f"""
             <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
@@ -490,4 +490,5 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
+
 
