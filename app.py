@@ -249,8 +249,13 @@ if call_data and station_data:
     selected_names = [options_map[l] for l in selected_labels]
     active_gdf = master_gdf[master_gdf['DISPLAY_NAME'].isin(selected_names)]
 
-    center_lon = df_calls['lon'].mean()
-    center_lat = df_calls['lat'].mean()
+    # Grab the bounding box of the active shapefile boundaries for accurate centering
+    minx, miny, maxx, maxy = active_gdf.to_crs(epsg=4326).total_bounds
+    
+    # Center strictly on the shapefile
+    center_lon = (minx + maxx) / 2
+    center_lat = (miny + maxy) / 2
+    
     utm_zone = int((center_lon + 180) / 6) + 1
     epsg_code = f"326{utm_zone}" if center_lat > 0 else f"327{utm_zone}"
     
@@ -469,11 +474,14 @@ if call_data and station_data:
     # --- MAP RENDERING ---
     fig = go.Figure()
     
-    def calculate_zoom(min_lon, max_lon):
+    def calculate_zoom(min_lon, max_lon, min_lat, max_lat):
+        """Calculates ideal zoom using the largest bounding dimension (width or height)."""
         width = max_lon - min_lon
-        if width <= 0: return 12
-        zoom = 10.5 - np.log(width)
-        return min(max(zoom, 10), 15)
+        height = max_lat - min_lat
+        max_dim = max(width, height)
+        if max_dim <= 0: return 12
+        zoom = 10.5 - np.log(max_dim)
+        return min(max(zoom, 8), 15)
 
     # Add Boundaries using SCATTERMAPBOX
     if show_boundaries:
@@ -524,16 +532,8 @@ if call_data and station_data:
             hoverinfo='name'
         ))
 
-    if not calls_in_city.empty:
-        q_low = calls_in_city.geometry.x.quantile(0.01)
-        q_high = calls_in_city.geometry.x.quantile(0.99)
-        clean_pts = calls_in_city[(calls_in_city.geometry.x >= q_low) & (calls_in_city.geometry.x <= q_high)]
-        if clean_pts.empty: clean_pts = calls_in_city
-        min_lon, min_lat = clean_pts.geometry.x.min(), clean_pts.geometry.y.min()
-        max_lon, max_lat = clean_pts.geometry.x.max(), clean_pts.geometry.y.max()
-        dynamic_zoom = calculate_zoom(min_lon, max_lon)
-    else:
-        dynamic_zoom = 12
+    # Calculate dynamic zoom strictly using the shapefile bounds we extracted earlier
+    dynamic_zoom = calculate_zoom(minx, maxx, miny, maxy)
 
     # Mapbox configuration Dictionary
     mapbox_config = dict(
