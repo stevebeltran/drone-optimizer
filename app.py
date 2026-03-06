@@ -20,7 +20,7 @@ st.markdown(
     <style>
     /* 1. Global font size for standard text */
     html, body, [class*="css"]  {
-        font-size: 20px !important; 
+        font-size: 18px !important; 
     }
 
     /* 2. Change the font size of the Radio Button Options (Maximize Land Coverage, etc.) */
@@ -36,7 +36,7 @@ st.markdown(
 
     /* 4. Change the font size of the Multi-Select box items */
     div[data-baseweb="select"] span {
-        font-size: 20px !important;
+        font-size: 18px !important;
     }
     </style>
     """,
@@ -335,6 +335,7 @@ if call_data and station_data:
     
     show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
     show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
+    show_satellite = st.sidebar.toggle("🌍 Satellite View", value=False)
     
     best_resp_names, best_guard_names = [], []
     
@@ -514,28 +515,37 @@ if call_data and station_data:
     else:
         dynamic_zoom, center_lat, center_lon = 12, 42.0, -88.0
 
- # Use ESRI World Imagery for high-quality free satellite view
-    fig.update_layout(
-        map_style="white-bg", 
-        map_layers=[
-            {
-                "below": 'traces',
-                "sourcetype": "raster",
-                "sourceattribution": "Esri, Maxar, Earthstar Geographics",
-                "source": [
-                    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                ]
-            }
-        ],
-        map_zoom=dynamic_zoom, 
-        map_center={"lat": center_lat, "lon": center_lon}, 
-        margin={"r":0,"t":0,"l":0,"b":0}, 
-        height=800,
-        font=dict(size=18)
-    )
+    # Determine Base Map based on Toggle
+    if show_satellite:
+        fig.update_layout(
+            map_style="white-bg", 
+            map_layers=[
+                {
+                    "below": 'traces',
+                    "sourcetype": "raster",
+                    "sourceattribution": "Esri, Maxar, Earthstar Geographics",
+                    "source": [
+                        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                    ]
+                }
+            ],
+            map_zoom=dynamic_zoom, 
+            map_center={"lat": center_lat, "lon": center_lon}, 
+            margin={"r":0,"t":0,"l":0,"b":0}, 
+            height=800,
+            font=dict(size=18)
+        )
+    else:
+        fig.update_layout(
+            map_style="open-street-map", 
+            map_zoom=dynamic_zoom, 
+            map_center={"lat": center_lat, "lon": center_lon}, 
+            margin={"r":0,"t":0,"l":0,"b":0}, 
+            height=800,
+            font=dict(size=18)
+        )
+
     st.plotly_chart(fig, width='stretch')
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
-
-
