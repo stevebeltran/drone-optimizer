@@ -517,16 +517,21 @@ if call_data and station_data:
 
     # --- THE ZOOM/PAN PRESERVATION FIX ---
     # Create a unique fingerprint for the current uploaded dataset
-    data_signature = f"{len(calls_in_city)}_{center_lat:.4f}"
+    data_signature = f"{len(calls_in_city)}_{center_lat:.4f}_{center_lon:.4f}"
 
     layout_kwargs = {
         "uirevision": data_signature, # This links UI memory directly to your dataset!
-        "map_zoom": dynamic_zoom,
-        "map_center": {"lat": center_lat, "lon": center_lon},
         "margin": {"r":0,"t":0,"l":0,"b":0}, 
         "height": 800,
         "font": dict(size=18)
     }
+
+    # Here is the magic: We ONLY explicitly set the zoom and center if the dataset is brand new.
+    # If we set it every time, Streamlit overrides Plotly's memory and forces a reset!
+    if st.session_state.get("current_data_signature") != data_signature:
+        st.session_state["current_data_signature"] = data_signature
+        layout_kwargs["map_zoom"] = dynamic_zoom
+        layout_kwargs["map_center"] = {"lat": center_lat, "lon": center_lon}
 
     # Add satellite layers if toggled
     if show_satellite:
@@ -550,4 +555,3 @@ if call_data and station_data:
 
 else:
     st.info("👋 Upload CSV data to begin. The map will auto-detect matching jurisdictions from the library.")
-
