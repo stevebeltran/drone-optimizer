@@ -91,7 +91,7 @@ def get_circle_coords(lat, lon, r_mi=2.0):
     return c_lats, c_lons
 
 # --- KML EXPORT FUNCTION ---
-def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_names, calls_gdf):
+def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_names, calls_gdf, guard_radius_mi):
     kml = simplekml.Kml()
     
     fol_bounds = kml.newfolder(name="Jurisdictions")
@@ -124,7 +124,7 @@ def generate_kml(active_gdf, df_stations_all, active_resp_names, active_guard_na
         add_kml_station(row, 2.0, simplekml.Color.blue, "[Responder]")
         
     for _, row in df_stations_all[df_stations_all['name'].isin(active_guard_names)].iterrows():
-        add_kml_station(row, 8.0, simplekml.Color.orange, "[Guardian]")
+        add_kml_station(row, guard_radius_mi, simplekml.Color.orange, "[Guardian]")
 
     fol_calls = kml.newfolder(name="Incident Data (Sample)")
     calls_export = calls_gdf.to_crs(epsg=4326)
@@ -208,10 +208,11 @@ def find_relevant_jurisdictions(calls_df, stations_df, shapefile_dir):
 
 # --- PERFORMANCE BOOSTER: CACHED SPATIAL MATH ---
 @st.cache_resource
-def precompute_spatial_data(df_calls, df_stations_all, city_m_wkt, epsg_code):
+def precompute_spatial_data(df_calls, df_stations_all, city_m_wkt, epsg_code, guard_radius_mi):
     """
     By wrapping this in st.cache_resource, Streamlit will lock this heavy geometry
     math in memory. Sliders and map renders will be instant after the first load.
+    The new guard_radius_mi parameter guarantees it recalculates if the range changes.
     """
     city_m = shapely.wkt.loads(city_m_wkt)
     
@@ -224,7 +225,7 @@ def precompute_spatial_data(df_calls, df_stations_all, city_m_wkt, epsg_code):
         calls_in_city = gdf_calls_utm
         
     radius_resp_m = 3218.69   # 2 Miles
-    radius_guard_m = 12874.75 # 8 Miles
+    radius_guard_m = guard_radius_mi * 1609.34 # Dynamic Range to Meters
     
     station_metadata = []
     total_calls = len(calls_in_city)
@@ -256,13 +257,13 @@ def precompute_spatial_data(df_calls, df_stations_all, city_m_wkt, epsg_code):
             try: clipped_2m = full_buf_2m.intersection(city_m)
             except: clipped_2m = full_buf_2m
 
-            full_buf_8m = s_pt_m.buffer(radius_guard_m)
-            try: clipped_8m = full_buf_8m.intersection(city_m)
-            except: clipped_8m = full_buf_8m
+            full_buf_guard = s_pt_m.buffer(radius_guard_m)
+            try: clipped_guard = full_buf_guard.intersection(city_m)
+            except: clipped_guard = full_buf_guard
                 
             station_metadata.append({
                 'name': row['name'], 'lat': row['lat'], 'lon': row['lon'],
-                'clipped_2m': clipped_2m, 'clipped_8m': clipped_8m
+                'clipped_2m': clipped_2m, 'clipped_guard': clipped_guard
             })
             
     return calls_in_city, display_calls, resp_matrix, guard_matrix, station_metadata, total_calls
@@ -339,20 +340,22 @@ if call_data and station_data:
         st.error(f"Geometry Error: {e}")
         st.stop()
 
+    # --- DYNAMIC CONTROLS (Moved up so precompute has the radius) ---
+    st.sidebar.header("🎯 Optimizer Controls")
+    guard_radius_mi = st.sidebar.slider("🦅 Guardian Range (Miles)", 1, 8, 8)
+    opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
+
     # --- TRIGGER THE CACHED HEAVY LIFTING ---
     with st.spinner("⚡ Precomputing spatial optimization matrices..."):
         city_m_wkt = city_m.wkt  # Convert geometry to string so Streamlit can hash it easily
         calls_in_city, display_calls, resp_matrix, guard_matrix, station_metadata, total_calls = precompute_spatial_data(
-            df_calls, df_stations_all, city_m_wkt, epsg_code
+            df_calls, df_stations_all, city_m_wkt, epsg_code, guard_radius_mi
         )
     n = len(df_stations_all)
 
-    # --- OPTIMIZER CONTROLS ---
-    st.sidebar.header("🎯 Optimizer Controls")
-    opt_strategy = st.sidebar.radio("Optimization Goal:", ("Maximize Call Coverage", "Maximize Land Coverage"), index=0)
-    
+    # --- REMAINING CONTROLS ---
     k_responder = st.sidebar.slider("🚁 Responder Drones (2-Mile)", 0, n, min(1, n))
-    k_guardian = st.sidebar.slider("🦅 Guardian Drones (8-Mile)", 0, n, 0)
+    k_guardian = st.sidebar.slider(f"🦅 Guardian Drones ({guard_radius_mi}-Mile)", 0, n, 0)
     
     show_boundaries = st.sidebar.checkbox("Show Jurisdiction Boundaries", value=True)
     show_heatmap = st.sidebar.toggle("🔥 Show Incident Heatmap", value=False)
@@ -383,7 +386,7 @@ if call_data and station_data:
                 if g_combo: cov = np.logical_or(cov, guard_matrix[list(g_combo)].any(axis=0))
                 score = cov.sum()
             else:
-                geos = [station_metadata[i]['clipped_2m'] for i in r_combo] + [station_metadata[i]['clipped_8m'] for i in g_combo]
+                geos = [station_metadata[i]['clipped_2m'] for i in r_combo] + [station_metadata[i]['clipped_guard'] for i in g_combo]
                 score = unary_union(geos).area if geos else 0.0
                 
             return (score, rg_combo)
@@ -431,7 +434,7 @@ if call_data and station_data:
     
     # --- UI SELECTION ---
     active_resp_names = ctrl_col2.multiselect("🚁 Active Responders (2-Mile)", options=df_stations_all['name'].tolist(), default=best_resp_names)
-    active_guard_names = ctrl_col2.multiselect("🦅 Active Guardians (8-Mile)", options=df_stations_all['name'].tolist(), default=best_guard_names)
+    active_guard_names = ctrl_col2.multiselect(f"🦅 Active Guardians ({guard_radius_mi}-Mile)", options=df_stations_all['name'].tolist(), default=best_guard_names)
     
     # --- METRICS CALCULATION ---
     area_covered_perc, overlap_perc, calls_covered_perc = 0.0, 0.0, 0.0
@@ -442,7 +445,7 @@ if call_data and station_data:
     active_resp_data = [station_metadata[i] for i in active_resp_idx]
     active_guard_data = [station_metadata[i] for i in active_guard_idx]
     
-    active_geos = [s['clipped_2m'] for s in active_resp_data] + [s['clipped_8m'] for s in active_guard_data]
+    active_geos = [s['clipped_2m'] for s in active_resp_data] + [s['clipped_guard'] for s in active_guard_data]
 
     if active_geos:
         if not city_m.is_empty:
@@ -489,7 +492,8 @@ if call_data and station_data:
         df_stations_all, 
         active_resp_names,
         active_guard_names,
-        calls_in_city
+        calls_in_city,
+        guard_radius_mi
     )
     
     st.sidebar.markdown("---")
@@ -568,7 +572,7 @@ if call_data and station_data:
             clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=2.0)
             lbl = f"{s_name} (Responder)"
         elif s_name in active_guard_names:
-            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=8.0)
+            clats, clons = get_circle_coords(row['lat'], row['lon'], r_mi=guard_radius_mi)
             lbl = f"{s_name} (Guardian)"
         else:
             continue
