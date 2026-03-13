@@ -334,7 +334,7 @@ def precompute_spatial_data(df_calls, df_stations_all, city_m_wkt, epsg_code, gu
         calls_in_city = gdf_calls_utm
         
     radius_resp_m = 3218.69   
-    radius_guard_m = guard_radius_mi * 1609.34 # Dynamic Radius
+    radius_guard_m = guard_radius_mi * 1609.34 # Convert dynamic miles to meters
     
     station_metadata = []
     total_calls = len(calls_in_city)
@@ -979,6 +979,24 @@ if st.session_state['csvs_ready']:
         m2.metric("Response Capacity %", f"{calls_covered_perc:.1f}%")
         m3.metric("Land Covered", f"{area_covered_perc:.1f}%")
         m4.metric("Redundancy (Overlap)", f"{overlap_perc:.1f}%")
+
+    # --- KML EXPORT ---
+    kml_data = generate_kml(
+        active_gdf, 
+        df_stations_all, 
+        active_resp_names,
+        active_guard_names,
+        calls_in_city,
+        guard_radius_mi
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.download_button(
+        label="🌏 Download for Google Earth",
+        data=kml_data,
+        file_name="drone_deployment.kml",
+        mime="application/vnd.google-earth.kml+xml"
+    )
 
     # ==========================================
     # --- MAIN UI SPLIT: MAP (LEFT) & STATS (RIGHT) ---
